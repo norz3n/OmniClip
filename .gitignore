@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+
+# Cargo lock (keep for binaries, optional for libs — keeping for reproducibility)
+# Cargo.lock
+
+# Replay output files
+*.mp4
+*.mkv
+
+# IDE and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Agent workspace (local only)
+.agents/
