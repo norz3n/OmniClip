@@ -113,3 +113,18 @@ pub fn toggle_overlay_visible() -> bool {
     new_state
 }
 
+/// Sends WM_CLOSE to the overlay window handle to trigger clean shutdown of the window event loop.
+pub fn close_overlay_window() {
+    unsafe {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+
+        let hwnd = get_overlay_hwnd();
+        if !hwnd.0.is_null() {
+            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+            log::info!("Dispatched WM_CLOSE to overlay HWND {:?}", hwnd.0);
+        }
+    }
+}
+
+

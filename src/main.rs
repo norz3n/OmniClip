@@ -20,6 +20,10 @@ use omni_clip::ui::{create_shared_ui_state, OmniClipApp, UiAction};
 /// Global shared run flag; also exported to the console handler via a static pointer.
 /// Using Arc<AtomicBool> so the eframe app can read it on the main thread without unsafe.
 static RUNNING_PTR: std::sync::OnceLock<Arc<AtomicBool>> = std::sync::OnceLock::new();
+static EGUI_CTX_PTR: std::sync::OnceLock<Arc<parking_lot::Mutex<Option<eframe::egui::Context>>>> =
+    std::sync::OnceLock::new();
+static MAIN_THREAD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static CTRL_C_COUNT: AtomicBool = AtomicBool::new(false);
 
 /// Win32 console control event handler for clean shutdown on Ctrl+C / close.
 unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
@@ -27,11 +31,47 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
         windows::Win32::System::Console::CTRL_C_EVENT
         | windows::Win32::System::Console::CTRL_BREAK_EVENT
         | windows::Win32::System::Console::CTRL_CLOSE_EVENT => {
+            if CTRL_C_COUNT.swap(true, Ordering::SeqCst) {
+                log::warn!("Repeated termination signal received, forcing immediate exit...");
+                std::process::exit(0);
+            }
+
             log::info!("Termination signal received, exiting gracefully...");
-            // Signal all threads and the egui window to close
+
+            // 1. Signal all worker threads to stop
             if let Some(arc) = RUNNING_PTR.get() {
                 arc.store(false, Ordering::SeqCst);
             }
+
+            // 2. Request viewport closure and wake up the winit/egui event loop
+            if let Some(ctx_lock) = EGUI_CTX_PTR.get() {
+                if let Some(ctx) = ctx_lock.lock().as_ref() {
+                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                    ctx.request_repaint();
+                }
+            }
+
+            // 3. Post WM_CLOSE directly to the overlay window handle
+            omni_clip::ui::close_overlay_window();
+
+            // 4. Post WM_QUIT to the main thread's Win32 message loop to instantly break out of eframe
+            let main_tid = MAIN_THREAD_ID.load(Ordering::SeqCst);
+            if main_tid != 0 {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostThreadMessageW(
+                    main_tid,
+                    windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
+                    windows::Win32::Foundation::WPARAM(0),
+                    windows::Win32::Foundation::LPARAM(0),
+                );
+            }
+
+            // PONYTAIL: 2.5-second watchdog fallback for graceful shutdown. Ceiling: if driver unload or COM release hangs indefinitely, process terminates forcefully after timeout. Upgrade path: asynchronous non-blocking resource cleanup with cooperative driver cancellation.
+            thread::spawn(|| {
+                thread::sleep(Duration::from_millis(2500));
+                log::warn!("Graceful shutdown timed out, forcing process exit...");
+                std::process::exit(0);
+            });
+
             BOOL(1)
         }
         _ => BOOL(0),
@@ -39,6 +79,10 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
 }
 
 fn main() -> Result<()> {
+    // Record main Win32 thread ID for console handler dispatch
+    let main_tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+    MAIN_THREAD_ID.store(main_tid, Ordering::SeqCst);
+
     // Initialize shared run flag before registering the console handler
     let running = Arc::new(AtomicBool::new(true));
     RUNNING_PTR.set(running.clone()).ok();
@@ -81,6 +125,7 @@ fn main() -> Result<()> {
     // Shared egui context handle to wake up the overlay event loop from background threads
     let egui_ctx_shared: Arc<parking_lot::Mutex<Option<eframe::egui::Context>>> =
         Arc::new(parking_lot::Mutex::new(None));
+    EGUI_CTX_PTR.set(egui_ctx_shared.clone()).ok();
     let egui_ctx_writer = egui_ctx_shared.clone();
     let egui_ctx_hk = egui_ctx_shared.clone();
 
