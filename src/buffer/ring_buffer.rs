@@ -178,6 +178,41 @@ impl RingBuffer {
         })
     }
 
+    /// Takes an atomic snapshot of the buffer for disk muxing and drains the buffer.
+    ///
+    /// Drains stored video and audio chunks into a `RingBufferSnapshot` (zero-copy) and resets
+    /// internal state so subsequent recording starts fresh from the next IDR keyframe.
+    ///
+    /// # Returns
+    /// * `Some(RingBufferSnapshot)` if valid keyframe-aligned data was captured.
+    /// * `None` if the buffer is empty.
+    pub fn take_snapshot(&mut self) -> Option<RingBufferSnapshot> {
+        if self.video_chunks.is_empty() {
+            return None;
+        }
+
+        // Verify IDR alignment invariant
+        assert!(
+            self.video_chunks.front().unwrap().is_keyframe,
+            "Ring buffer front chunk must be an IDR keyframe"
+        );
+
+        let snapshot = RingBufferSnapshot {
+            video_chunks: self.video_chunks.drain(..).collect(),
+            audio_chunks: self.audio_chunks.drain(..).collect(),
+            width: self.width,
+            height: self.height,
+            fps: self.fps,
+            audio_sample_rate: self.audio_sample_rate,
+            audio_channels: self.audio_channels,
+        };
+
+        self.total_bytes = 0;
+        self.has_seen_first_keyframe = false;
+
+        Some(snapshot)
+    }
+
     /// Current memory usage in bytes.
     #[inline]
     pub fn total_bytes(&self) -> usize {
@@ -312,5 +347,46 @@ mod tests {
         // First chunk in buffer should now be Keyframe 3 at 2s (20_000_000)
         // since keeping from 20_000_000 to 40_000_000 is exactly 20_000_000 HNS (2 seconds).
         assert_eq!(snap.video_chunks.first().unwrap().pts_hns, 20_000_000);
+    }
+
+    #[test]
+    fn test_ring_buffer_take_snapshot_drains_and_resets() {
+        let mut rb = RingBuffer::new(10_000_000, 1920, 1080, 60, 48000, 2);
+
+        // Push initial keyframe
+        rb.push_video(VideoChunk {
+            is_keyframe: true,
+            pts_hns: 100,
+            dts_hns: 100,
+            duration_hns: 166_666,
+            data: vec![1, 2, 3],
+        });
+
+        assert_eq!(rb.video_count(), 1);
+
+        let snap = rb.take_snapshot().expect("snapshot should exist");
+        assert_eq!(snap.video_chunks.len(), 1);
+        assert_eq!(rb.video_count(), 0);
+        assert_eq!(rb.total_bytes(), 0);
+
+        // Buffer is now reset: next non-keyframe must be discarded
+        rb.push_video(VideoChunk {
+            is_keyframe: false,
+            pts_hns: 200,
+            dts_hns: 200,
+            duration_hns: 166_666,
+            data: vec![4, 5, 6],
+        });
+        assert_eq!(rb.video_count(), 0);
+
+        // Next keyframe should start new sequence
+        rb.push_video(VideoChunk {
+            is_keyframe: true,
+            pts_hns: 300,
+            dts_hns: 300,
+            duration_hns: 166_666,
+            data: vec![7, 8, 9],
+        });
+        assert_eq!(rb.video_count(), 1);
     }
 }

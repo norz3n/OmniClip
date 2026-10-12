@@ -240,10 +240,13 @@ fn main() -> Result<()> {
                         match action {
                             UiAction::SaveReplay => {
                                 info!("UI requested replay dump!");
-                                if let Some(snapshot) = ring_buffer_capture.lock().snapshot() {
+                                let mut rb = ring_buffer_capture.lock();
+                                if let Some(snapshot) = rb.take_snapshot() {
+                                    ui_state_clone.write().set_current_ram_bytes(0);
                                     let _ = dump_tx_capture.send(snapshot);
                                 } else {
                                     log::warn!("Ring buffer not ready yet (waiting for keyframe)");
+                                    ui_state_clone.write().is_saving_disk = false;
                                 }
                             }
                             UiAction::SetBufferDuration(secs) => {
