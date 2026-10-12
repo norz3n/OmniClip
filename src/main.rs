@@ -119,6 +119,9 @@ fn main() -> Result<()> {
         config.audio_bitrate,
         config.mic_enabled,
         config.mic_volume,
+        None,
+        None,
+        false,
         audio_tx,
     )?;
 
@@ -137,14 +140,12 @@ fn main() -> Result<()> {
         log::warn!("Failed to spawn HUD toast thread: {}", e);
     }
 
-    // Background Disk Writer thread
-    let (dump_tx, dump_rx) = crossbeam_channel::unbounded::<RingBufferSnapshot>();
-    let output_dir_clone = config.output_dir.clone();
+    // Background Disk Writer thread with dynamic user-configured destination path
+    let (dump_tx, dump_rx) = crossbeam_channel::unbounded::<(RingBufferSnapshot, PathBuf)>();
     let writer_handle = thread::Builder::new()
         .name("omniclip-disk-writer".to_string())
         .spawn(move || {
-            while let Ok(snapshot) = dump_rx.recv() {
-                let target_file = Mp4Muxer::generate_replay_filename(&output_dir_clone);
+            while let Ok((snapshot, target_file)) = dump_rx.recv() {
                 info!("Disk Writer: Saving replay to '{}'...", target_file.display());
                 match Mp4Muxer::write_replay(&snapshot, &target_file) {
                     Ok(path) => {
@@ -293,7 +294,18 @@ fn main() -> Result<()> {
                                 info!("UI requested replay dump!");
                                 let rb = ring_buffer_capture.lock();
                                 if let Some(snapshot) = rb.snapshot() {
-                                    let _ = dump_tx_capture.send(snapshot);
+                                    let (pattern, out_dir) = {
+                                        let st = ui_state_clone.read();
+                                        (st.filename_pattern.clone(), st.output_dir.clone())
+                                    };
+                                    let target_file = Mp4Muxer::format_replay_filename(
+                                        &pattern,
+                                        &out_dir,
+                                        snapshot.width,
+                                        snapshot.height,
+                                        snapshot.fps,
+                                    );
+                                    let _ = dump_tx_capture.send((snapshot, target_file));
                                     encoder.request_keyframe();
                                 } else {
                                     log::warn!("Ring buffer not ready yet (waiting for keyframe)");
@@ -318,6 +330,12 @@ fn main() -> Result<()> {
                             }
                             UiAction::SetOutputDir(dir) => {
                                 log::info!("UI SetOutputDir: {:?} requested", dir);
+                            }
+                            UiAction::SetFilenamePattern(pat) => {
+                                log::info!("UI SetFilenamePattern: '{}' requested", pat);
+                            }
+                            UiAction::SetAudioMultiTrack(multi) => {
+                                log::info!("UI SetAudioMultiTrack: {} requested", multi);
                             }
                             UiAction::QuitApplication => {
                                 running_capture.store(false, Ordering::SeqCst);
@@ -401,6 +419,7 @@ fn main() -> Result<()> {
             .with_transparent(true)
             .with_always_on_top()
             .with_visible(false)
+            .with_drag_and_drop(false)
             .with_inner_size([win_w, win_h])
             .with_position([pos_x, pos_y]),
         ..Default::default()

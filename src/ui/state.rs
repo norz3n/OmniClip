@@ -145,6 +145,20 @@ pub struct UiState {
     pub audio_channels: String,
     /// Whether to record game and microphone into separate audio tracks.
     pub audio_multi_track: bool,
+    /// Selected audio playback endpoint ID ("default" for system default).
+    pub selected_playback_device: String,
+    /// Selected audio recording endpoint ID ("default" for system default).
+    pub selected_capture_device: String,
+    /// Enumerated audio playback devices: (device_id, friendly_name).
+    pub available_playback_devices: Vec<(String, String)>,
+    /// Enumerated audio capture/microphone devices: (device_id, friendly_name).
+    pub available_capture_devices: Vec<(String, String)>,
+    /// Application audio capture mode: "all" (All system), "include" (Selected only), "exclude" (Exclude selected).
+    pub audio_app_filter_mode: String,
+    /// List of detected active audio application executable names (e.g. "Discord.exe").
+    pub detected_audio_apps: Vec<String>,
+    /// Set of application executable names selected for include/exclude filter.
+    pub selected_audio_apps: Vec<String>,
 
     /// Hard RAM memory limit safety cap for circular buffer in Gigabytes.
     pub buffer_ram_limit_gb: u32,
@@ -222,6 +236,13 @@ impl UiState {
             audio_sample_rate_hz: 48000,
             audio_channels: "Стерео (2.0)".to_string(),
             audio_multi_track: false,
+            selected_playback_device: "default".to_string(),
+            selected_capture_device: "default".to_string(),
+            available_playback_devices: Vec::new(),
+            available_capture_devices: Vec::new(),
+            audio_app_filter_mode: "all".to_string(),
+            detected_audio_apps: Vec::new(),
+            selected_audio_apps: Vec::new(),
             buffer_ram_limit_gb: 4,
             buffer_autostart: true,
             filename_pattern: "Replay_%Y-%m-%d_%H-%M-%S".to_string(),

@@ -26,6 +26,10 @@ pub enum UiAction {
     SetMicVolume(f32),
     /// Change target folder for saved clips.
     SetOutputDir(PathBuf),
+    /// Change filename pattern template.
+    SetFilenamePattern(String),
+    /// Change multi-track audio configuration.
+    SetAudioMultiTrack(bool),
     /// Request clean application shutdown.
     QuitApplication,
 }
@@ -55,6 +59,21 @@ impl OmniClipApp {
         running: std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> Self {
         let initial_path = state.read().output_dir.to_string_lossy().to_string();
+
+        // Enumerate initial audio devices and active sessions
+        {
+            let mut st = state.write();
+            if st.available_playback_devices.is_empty() {
+                st.available_playback_devices = crate::audio::enumerate_audio_devices(false);
+            }
+            if st.available_capture_devices.is_empty() {
+                st.available_capture_devices = crate::audio::enumerate_audio_devices(true);
+            }
+            if st.detected_audio_apps.is_empty() {
+                st.detected_audio_apps = crate::audio::enumerate_audio_sessions();
+            }
+        }
+
         Self {
             state,
             action_tx,
@@ -313,32 +332,31 @@ impl OmniClipApp {
 
     /// Renders an active toast notification banner when a replay has been saved.
     fn render_toast_banner(&self, ui: &mut egui::Ui, toast: &crate::ui::state::ToastNotification) {
-        let available_w = ui.available_width();
+        let banner_w = ui.available_width();
+        let inner_w = (banner_w - 28.0).max(10.0);
         egui::Frame::NONE
             .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
             .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_PRIMARY))
             .corner_radius(CornerRadius::same(M3Theme::RADIUS_MD_U8))
             .inner_margin(egui::vec2(14.0, 8.0))
             .show(ui, |ui| {
-                let inner_w = (available_w - 28.0).max(10.0);
                 ui.set_min_width(inner_w);
                 ui.set_max_width(inner_w);
-                ui.allocate_space(Vec2::new(inner_w, 0.0));
                 ui.allocate_ui_with_layout(
-                    Vec2::new(inner_w, 28.0),
+                    Vec2::new(inner_w, 26.0),
                     Layout::left_to_right(Align::Center),
                     |ui| {
                         ui.label(
                             RichText::new(M3Icon::CHECK)
                                 .color(M3Theme::EGUI_STATUS_GREEN)
-                                .size(14.0)
+                                .size(13.0)
                                 .strong(),
                         );
                         ui.add_space(4.0);
                         ui.label(
                             RichText::new(&toast.title)
                                 .color(M3Theme::EGUI_PRIMARY)
-                                .size(13.0)
+                                .size(12.5)
                                 .strong(),
                         );
                         ui.add_space(6.0);
@@ -351,7 +369,8 @@ impl OmniClipApp {
                         ui.label(
                             RichText::new(&toast.filename)
                                 .color(M3Theme::EGUI_ON_SURFACE)
-                                .size(12.0),
+                                .size(12.0)
+                                .strong(),
                         );
                         ui.add_space(8.0);
 
@@ -378,7 +397,7 @@ impl OmniClipApp {
                                 )
                                 .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
                                 .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
-                                .min_size(Vec2::new(0.0, 26.0)),
+                                .min_size(Vec2::new(0.0, 24.0)),
                             );
                             if reveal_btn.clicked() {
                                 // ponytail: Use Windows Explorer select command without external subprocess abstractions
@@ -409,7 +428,6 @@ impl OmniClipApp {
             .show(ui, |ui| {
                 ui.set_min_width(inner_w);
                 ui.set_max_width(inner_w);
-                ui.allocate_space(Vec2::new(inner_w, 0.0));
                 ui.label(RichText::new(title).color(M3Theme::EGUI_ON_SURFACE).size(14.0).strong());
                 if let Some(sub) = subtitle {
                     ui.label(RichText::new(sub).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
@@ -444,6 +462,74 @@ impl OmniClipApp {
     /// Helper to render a vertically centered horizontal row spanning available width.
     fn render_row<R>(&self, ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui) -> R) -> R {
         Self::row(ui, add_contents)
+    }
+
+    /// Associated function to render a slider row with fixed-width label, uniform slider rail, and an aligned Material 3 dynamic value badge.
+    pub fn slider_row<T: egui::emath::Numeric>(
+        ui: &mut egui::Ui,
+        label: &str,
+        val: &mut T,
+        range: std::ops::RangeInclusive<T>,
+        step: Option<f64>,
+        badge_text: &str,
+        badge_width: f32,
+    ) -> bool {
+        let mut changed = false;
+        Self::row(ui, |ui| {
+            ui.allocate_ui_with_layout(
+                Vec2::new(180.0, 26.0),
+                Layout::left_to_right(Align::Center),
+                |ui| {
+                    ui.label(RichText::new(label).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(12.0));
+                },
+            );
+
+            let mut slider = egui::Slider::new(val, range).show_value(false);
+            if let Some(s) = step {
+                slider = slider.step_by(s);
+            }
+            let res = ui.add_sized(Vec2::new(190.0, 20.0), slider);
+            if res.changed() {
+                changed = true;
+            }
+
+            ui.add_space(10.0);
+
+            let (rect, _) = ui.allocate_exact_size(Vec2::new(badge_width, 24.0), egui::Sense::hover());
+            ui.painter().rect_filled(
+                rect,
+                CornerRadius::same(M3Theme::RADIUS_SM_U8),
+                M3Theme::EGUI_SURFACE_CONTAINER_HIGH,
+            );
+            ui.painter().rect_stroke(
+                rect,
+                CornerRadius::same(M3Theme::RADIUS_SM_U8),
+                Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT),
+                egui::StrokeKind::Inside,
+            );
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                badge_text,
+                egui::FontId::proportional(11.5),
+                M3Theme::EGUI_ON_SURFACE,
+            );
+        });
+        changed
+    }
+
+    /// Helper to render a slider row with fixed-width label, uniform slider rail, and an aligned Material 3 dynamic value badge.
+    fn render_slider_row<T: egui::emath::Numeric>(
+        &self,
+        ui: &mut egui::Ui,
+        label: &str,
+        val: &mut T,
+        range: std::ops::RangeInclusive<T>,
+        step: Option<f64>,
+        badge_text: &str,
+        badge_width: f32,
+    ) -> bool {
+        Self::slider_row(ui, label, val, range, step, badge_text, badge_width)
     }
 
     /// Helper to render a compact styled preset chip.
@@ -721,19 +807,40 @@ impl OmniClipApp {
                         egui::Frame::NONE
                             .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
                             .corner_radius(CornerRadius::same(M3Theme::RADIUS_SM_U8))
-                            .inner_margin(egui::vec2(10.0, 6.0))
+                            .inner_margin(egui::vec2(12.0, 8.0))
                             .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
                                 ui.label(
                                     RichText::new("Последний сохраненный клип:")
                                         .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                                         .size(10.5),
                                 );
-                                ui.label(
-                                    RichText::new(format!("{}  {}", M3Icon::VIDEO, recent.filename))
-                                        .color(M3Theme::EGUI_PRIMARY)
-                                        .size(11.5)
-                                        .strong(),
-                                );
+                                ui.add_space(2.0);
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(M3Icon::VIDEO)
+                                            .color(M3Theme::EGUI_PRIMARY)
+                                            .size(12.0),
+                                    );
+                                    ui.label(
+                                        RichText::new(&recent.filename)
+                                            .color(M3Theme::EGUI_ON_SURFACE)
+                                            .size(11.5)
+                                            .strong(),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new("·")
+                                            .color(M3Theme::EGUI_OUTLINE)
+                                            .size(11.5),
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.label(
+                                        RichText::new(format!("{}с · {:.1} МБ", recent.duration_secs, recent.size_mb))
+                                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                            .size(11.0),
+                                    );
+                                });
                             });
                     }
                 });
@@ -786,15 +893,12 @@ impl OmniClipApp {
                 });
 
                 ui.add_space(6.0);
-                self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Точный FPS:").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.5));
-                    let mut fps_val = state.target_fps;
-                    let slider = ui.add(egui::Slider::new(&mut fps_val, 15..=240).suffix(" FPS"));
-                    if slider.changed() {
-                        self.state.write().target_fps = fps_val;
-                        let _ = self.action_tx.send(UiAction::SetFps(fps_val));
-                    }
-                });
+                let mut fps_val = state.target_fps;
+                let fps_badge = format!("{} FPS", fps_val);
+                if self.render_slider_row(ui, "Точный FPS:", &mut fps_val, 15..=240, Some(1.0), &fps_badge, 64.0) {
+                    self.state.write().target_fps = fps_val;
+                    let _ = self.action_tx.send(UiAction::SetFps(fps_val));
+                }
             },
         );
 
@@ -827,7 +931,7 @@ impl OmniClipApp {
                         (35, "35 Mbps (Баланс)"),
                         (50, "50 Mbps (Качество)"),
                         (80, "80 Mbps (Ультра)"),
-                        (120, "120 Mbps (Без потерь)"),
+                        (120, "120 Mbps (Макс)"),
                     ];
                     for (mbps, label) in presets {
                         let is_sel = state.video_bitrate_mbps == mbps;
@@ -839,23 +943,19 @@ impl OmniClipApp {
                 });
 
                 ui.add_space(6.0);
-                self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Слайдер битрейта:").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.5));
-                    let mut bitrate_val = state.video_bitrate_mbps;
-                    let slider = ui.add(egui::Slider::new(&mut bitrate_val, 2..=150).suffix(" Mbps"));
-                    if slider.changed() {
-                        self.state.write().video_bitrate_mbps = bitrate_val;
-                        let _ = self.action_tx.send(UiAction::SetBitrate(bitrate_val));
-                    }
+                let mut bitrate_val = state.video_bitrate_mbps;
+                let bit_badge = format!("{} Mbps", bitrate_val);
+                if self.render_slider_row(ui, "Слайдер битрейта:", &mut bitrate_val, 2..=150, Some(1.0), &bit_badge, 68.0) {
+                    self.state.write().video_bitrate_mbps = bitrate_val;
+                    let _ = self.action_tx.send(UiAction::SetBitrate(bitrate_val));
+                }
 
-                    ui.add_space(16.0);
-                    ui.label(RichText::new("Макс. пиковый:").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.5));
-                    let mut peak_val = state.video_peak_bitrate_mbps;
-                    let peak_slider = ui.add(egui::Slider::new(&mut peak_val, 5..=200).suffix(" Mbps"));
-                    if peak_slider.changed() {
-                        self.state.write().video_peak_bitrate_mbps = peak_val;
-                    }
-                });
+                ui.add_space(4.0);
+                let mut peak_val = state.video_peak_bitrate_mbps;
+                let peak_badge = format!("{} Mbps", peak_val);
+                if self.render_slider_row(ui, "Макс. пиковый:", &mut peak_val, 5..=200, Some(1.0), &peak_badge, 68.0) {
+                    self.state.write().video_peak_bitrate_mbps = peak_val;
+                }
             },
         );
 
@@ -888,8 +988,11 @@ impl OmniClipApp {
                             self.state.write().video_profile = prof.to_string();
                         }
                     }
+                });
 
-                    ui.add_space(16.0);
+                ui.add_space(8.0);
+
+                self.render_row(ui, |ui| {
                     ui.label(RichText::new("Интервал GOP:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     for gop in [(1, "1 сек (Быстрый сброс)"), (2, "2 сек (Сжатие)")] {
                         let is_sel = state.video_gop_secs == gop.0;
@@ -909,8 +1012,11 @@ impl OmniClipApp {
                             self.state.write().video_color_range = cr.to_string();
                         }
                     }
+                });
 
-                    ui.add_space(16.0);
+                ui.add_space(8.0);
+
+                self.render_row(ui, |ui| {
                     ui.label(RichText::new("B-кадры:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     for b in [0, 1, 2] {
                         let is_sel = state.video_b_frames == b;
@@ -931,15 +1037,12 @@ impl OmniClipApp {
             "⏱ Глубина мгновенного повтора и лимиты памяти",
             Some("Настройка кольцевого буфера FIFO в ОЗУ с автовытеснением устаревших кадров"),
             |ui| {
-                self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Длительность буфера:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    let mut duration_val = state.buffer_duration_secs;
-                    let slider = ui.add(egui::Slider::new(&mut duration_val, 10..=1200).suffix(" сек").step_by(5.0));
-                    if slider.changed() {
-                        self.state.write().set_buffer_duration(duration_val);
-                        let _ = self.action_tx.send(UiAction::SetBufferDuration(duration_val));
-                    }
-                });
+                let mut duration_val = state.buffer_duration_secs;
+                let dur_badge = format!("{} сек", duration_val);
+                if self.render_slider_row(ui, "Длительность буфера:", &mut duration_val, 10..=1200, Some(5.0), &dur_badge, 68.0) {
+                    self.state.write().set_buffer_duration(duration_val);
+                    let _ = self.action_tx.send(UiAction::SetBufferDuration(duration_val));
+                }
 
                 ui.add_space(8.0);
 
@@ -1046,6 +1149,47 @@ impl OmniClipApp {
 
                 ui.add_space(8.0);
 
+                // Microphone Device Selection ComboBox
+                self.render_row(ui, |ui| {
+                    ui.label(RichText::new("Устройство ввода:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let current_mic = if state.selected_capture_device == "default" || state.selected_capture_device.is_empty() {
+                        "По умолчанию (Системный микрофон)".to_string()
+                    } else {
+                        state.available_capture_devices
+                            .iter()
+                            .find(|(id, _)| id == &state.selected_capture_device)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| "По умолчанию (Системный микрофон)".to_string())
+                    };
+
+                    egui::ComboBox::from_id_salt("mic_device_combo")
+                        .selected_text(RichText::new(&current_mic).color(M3Theme::EGUI_ON_SURFACE).size(12.0))
+                        .width(260.0)
+                        .show_ui(ui, |ui| {
+                            let is_def = state.selected_capture_device == "default" || state.selected_capture_device.is_empty();
+                            if ui.selectable_label(is_def, "По умолчанию (Системный микрофон)").clicked() {
+                                self.state.write().selected_capture_device = "default".to_string();
+                            }
+                            for (dev_id, dev_name) in &state.available_capture_devices {
+                                let is_sel = &state.selected_capture_device == dev_id;
+                                if ui.selectable_label(is_sel, dev_name).clicked() {
+                                    self.state.write().selected_capture_device = dev_id.clone();
+                                }
+                            }
+                        });
+
+                    if ui.add(
+                        egui::Button::new(RichText::new(format!("{}  Обновить", M3Icon::REFRESH)).size(11.0))
+                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                    ).clicked() {
+                        let devs = crate::audio::enumerate_audio_devices(true);
+                        self.state.write().available_capture_devices = devs;
+                    }
+                });
+
+                ui.add_space(8.0);
+
                 self.render_row(ui, |ui| {
                     ui.label(RichText::new("Режим активации:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     let ptt = state.mic_mode_ptt;
@@ -1068,41 +1212,32 @@ impl OmniClipApp {
 
                 ui.add_space(8.0);
 
-                self.render_row(ui, |ui| {
-                    let db_val = if state.mic_volume > 0.0 {
-                        20.0 * state.mic_volume.log10()
-                    } else {
-                        -60.0
-                    };
-                    ui.label(RichText::new(format!("Громкость микрофона: {:.0}% ({:.1} dB)", state.mic_volume * 100.0, db_val)).color(M3Theme::EGUI_ON_SURFACE).size(12.0));
-                    let mut vol = state.mic_volume;
-                    let slider = ui.add(egui::Slider::new(&mut vol, 0.0..=2.0).step_by(0.05));
-                    if slider.changed() {
-                        self.state.write().mic_volume = vol;
-                        let _ = self.action_tx.send(UiAction::SetMicVolume(vol));
-                    }
-                });
-
                 ui.add_space(6.0);
+                let mut vol = state.mic_volume;
+                let mic_db = if vol > 0.0 { 20.0 * vol.log10() } else { -60.0 };
+                let mic_badge = format!("{:.0}% ({:.1} dB)", vol * 100.0, mic_db);
+                if self.render_slider_row(ui, "Громкость микрофона:", &mut vol, 0.0..=2.0, Some(0.05), &mic_badge, 88.0) {
+                    self.state.write().mic_volume = vol;
+                    let _ = self.action_tx.send(UiAction::SetMicVolume(vol));
+                }
 
-                self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Порог шумоподавления (Noise Gate):").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.5));
-                    let mut gate = state.mic_noise_gate_db;
-                    let slider = ui.add(egui::Slider::new(&mut gate, -60.0..=0.0).suffix(" dB").step_by(1.0));
-                    if slider.changed() {
-                        self.state.write().mic_noise_gate_db = gate;
-                    }
-                });
+                ui.add_space(4.0);
+
+                let mut gate = state.mic_noise_gate_db;
+                let gate_badge = format!("{:.0} dB", gate);
+                if self.render_slider_row(ui, "Порог шумоподавления:", &mut gate, -60.0..=0.0, Some(1.0), &gate_badge, 64.0) {
+                    self.state.write().mic_noise_gate_db = gate;
+                }
             },
         );
 
         ui.add_space(8.0);
 
-        // Section 2: Game / Desktop Audio
+        // Section 2: Game / Desktop Audio & App Filter
         self.render_section_card(
             ui,
-            "🔊 Системный звук и игра (WASAPI Loopback)",
-            Some("Прямой перехват аудиопотока Windows без потери качества"),
+            "🔊 Системный звук и приложения (WASAPI Loopback)",
+            Some("Прямой перехват аудиопотока Windows без потери качества с фильтрацией приложений"),
             |ui| {
                 let mut game_on = state.game_audio_enabled;
                 if self.render_toggle_switch(
@@ -1116,19 +1251,128 @@ impl OmniClipApp {
 
                 ui.add_space(8.0);
 
+                // Playback Device Selection ComboBox
                 self.render_row(ui, |ui| {
-                    let db_val = if state.game_audio_volume > 0.0 {
-                        20.0 * state.game_audio_volume.log10()
+                    ui.label(RichText::new("Устройство вывода:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let current_playback = if state.selected_playback_device == "default" || state.selected_playback_device.is_empty() {
+                        "По умолчанию (Системные динамики)".to_string()
                     } else {
-                        -60.0
+                        state.available_playback_devices
+                            .iter()
+                            .find(|(id, _)| id == &state.selected_playback_device)
+                            .map(|(_, name)| name.clone())
+                            .unwrap_or_else(|| "По умолчанию (Системные динамики)".to_string())
                     };
-                    ui.label(RichText::new(format!("Громкость игры: {:.0}% ({:.1} dB)", state.game_audio_volume * 100.0, db_val)).color(M3Theme::EGUI_ON_SURFACE).size(12.0));
-                    let mut gvol = state.game_audio_volume;
-                    let slider = ui.add(egui::Slider::new(&mut gvol, 0.0..=1.0).step_by(0.05));
-                    if slider.changed() {
-                        self.state.write().game_audio_volume = gvol;
+
+                    egui::ComboBox::from_id_salt("playback_device_combo")
+                        .selected_text(RichText::new(&current_playback).color(M3Theme::EGUI_ON_SURFACE).size(12.0))
+                        .width(260.0)
+                        .show_ui(ui, |ui| {
+                            let is_def = state.selected_playback_device == "default" || state.selected_playback_device.is_empty();
+                            if ui.selectable_label(is_def, "По умолчанию (Системные динамики)").clicked() {
+                                self.state.write().selected_playback_device = "default".to_string();
+                            }
+                            for (dev_id, dev_name) in &state.available_playback_devices {
+                                let is_sel = &state.selected_playback_device == dev_id;
+                                if ui.selectable_label(is_sel, dev_name).clicked() {
+                                    self.state.write().selected_playback_device = dev_id.clone();
+                                }
+                            }
+                        });
+
+                    if ui.add(
+                        egui::Button::new(RichText::new(format!("{}  Обновить", M3Icon::REFRESH)).size(11.0))
+                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                    ).clicked() {
+                        let devs = crate::audio::enumerate_audio_devices(false);
+                        self.state.write().available_playback_devices = devs;
                     }
                 });
+
+                ui.add_space(6.0);
+
+                let mut gvol = state.game_audio_volume;
+                let game_db = if gvol > 0.0 { 20.0 * gvol.log10() } else { -60.0 };
+                let game_badge = format!("{:.0}% ({:.1} dB)", gvol * 100.0, game_db);
+                if self.render_slider_row(ui, "Громкость игры:", &mut gvol, 0.0..=1.0, Some(0.05), &game_badge, 88.0) {
+                    self.state.write().game_audio_volume = gvol;
+                }
+
+                ui.add_space(10.0);
+
+                // Application Audio Filtering Mode
+                self.render_row(ui, |ui| {
+                    ui.label(RichText::new("Фильтр приложений:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    for (mode_key, mode_lbl) in [
+                        ("all", "Все звуки системы"),
+                        ("include", "Только выбранные"),
+                        ("exclude", "Исключить приложения"),
+                    ] {
+                        let is_sel = state.audio_app_filter_mode == mode_key;
+                        if self.render_preset_chip(ui, mode_lbl, is_sel) {
+                            self.state.write().audio_app_filter_mode = mode_key.to_string();
+                        }
+                    }
+                });
+
+                if state.audio_app_filter_mode != "all" {
+                    ui.add_space(8.0);
+                    egui::Frame::NONE
+                        .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                        .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
+                        .corner_radius(CornerRadius::same(M3Theme::RADIUS_MD_U8))
+                        .inner_margin(12.0)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let filter_hint = if state.audio_app_filter_mode == "include" {
+                                    "Записывать звук только из отмеченных приложений:"
+                                } else {
+                                    "Глушить звук из отмеченных приложений (напр. Discord/Spotify):"
+                                };
+                                ui.label(RichText::new(filter_hint).color(M3Theme::EGUI_ON_SURFACE).size(12.0).strong());
+
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if ui.add(
+                                        egui::Button::new(RichText::new(format!("{}  Сканировать заново", M3Icon::REFRESH)).size(11.0))
+                                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
+                                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                    ).clicked() {
+                                        let apps = crate::audio::enumerate_audio_sessions();
+                                        self.state.write().detected_audio_apps = apps;
+                                    }
+                                });
+                            });
+
+                            ui.add_space(8.0);
+                            let mut selected_apps = state.selected_audio_apps.clone();
+                            let mut apps_changed = false;
+
+                            ui.horizontal_wrapped(|ui| {
+                                for app in &state.detected_audio_apps {
+                                    let mut is_checked = selected_apps.contains(app);
+                                    let checkbox = ui.checkbox(
+                                        &mut is_checked,
+                                        RichText::new(app).color(M3Theme::EGUI_ON_SURFACE).size(12.0),
+                                    );
+                                    if checkbox.changed() {
+                                        if is_checked {
+                                            if !selected_apps.contains(app) {
+                                                selected_apps.push(app.clone());
+                                            }
+                                        } else {
+                                            selected_apps.retain(|a| a != app);
+                                        }
+                                        apps_changed = true;
+                                    }
+                                }
+                            });
+
+                            if apps_changed {
+                                self.state.write().selected_audio_apps = selected_apps;
+                            }
+                        });
+                }
             },
         );
 
@@ -1179,9 +1423,10 @@ impl OmniClipApp {
                     ui,
                     &mut multi,
                     "Раздельные аудиодорожки в MP4",
-                    Some("Дорожка 1 = Игра, Дорожка 2 = Микрофон (идеально для монтажа в Premiere/DaVinci)"),
+                    Some("Дорожка 1 = Игра / Система, Дорожка 2 = Микрофон (отдельные дорожки для Premiere / DaVinci Resolve)"),
                 ) {
                     self.state.write().audio_multi_track = multi;
+                    let _ = self.action_tx.send(UiAction::SetAudioMultiTrack(multi));
                 }
             },
         );
@@ -1208,24 +1453,29 @@ impl OmniClipApp {
                     egui::Frame::NONE
                         .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
                         .corner_radius(CornerRadius::same(M3Theme::RADIUS_MD_U8))
-                        .inner_margin(egui::vec2(12.0, 6.0))
+                        .inner_margin(egui::vec2(12.0, 8.0))
                         .show(ui, |ui| {
-                            let item_w = ui.available_width();
-                            ui.allocate_space(Vec2::new(item_w, 0.0));
-                            ui.horizontal(|ui| {
-                                ui.vertical(|ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.set_max_width(ui.available_width());
+                            ui.allocate_ui_with_layout(
+                                Vec2::new(ui.available_width(), 26.0),
+                                Layout::left_to_right(Align::Center),
+                                |ui| {
                                     ui.label(RichText::new(name).color(M3Theme::EGUI_ON_SURFACE).size(12.5).strong());
-                                    ui.label(RichText::new(desc).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(10.5));
-                                });
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new("·").color(M3Theme::EGUI_OUTLINE).size(12.0));
+                                    ui.add_space(8.0);
+                                    ui.label(RichText::new(desc).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
 
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if !key2.is_empty() {
-                                        self.render_keycap(ui, key2);
-                                        ui.label(RichText::new("+").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(12.0));
-                                    }
-                                    self.render_keycap(ui, key1);
-                                });
-                            });
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        if !key2.is_empty() {
+                                            self.render_keycap(ui, key2);
+                                            ui.label(RichText::new("+").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(12.0));
+                                        }
+                                        self.render_keycap(ui, key1);
+                                    });
+                                },
+                            );
                         });
                     ui.add_space(4.0);
                 }
@@ -1263,20 +1513,40 @@ impl OmniClipApp {
             |ui| {
                 Self::row(ui, |ui| {
                     ui.allocate_ui_with_layout(
-                        Vec2::new(140.0, 28.0),
+                        Vec2::new(180.0, 26.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.label(RichText::new("Папка сохранения:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                            ui.label(RichText::new("Папка сохранения:").color(M3Theme::EGUI_ON_SURFACE).size(12.0));
                         },
                     );
 
-                    let edit_width = (ui.available_width() - 250.0).max(180.0);
                     let path_edit = ui.add(
                         egui::TextEdit::singleline(path_edit_buffer)
-                            .desired_width(edit_width)
-                            .min_size(Vec2::new(0.0, 28.0))
-                            .margin(egui::vec2(8.0, 5.0)),
+                            .desired_width(260.0)
+                            .min_size(Vec2::new(0.0, 26.0))
+                            .margin(egui::vec2(8.0, 4.0)),
                     );
+
+                    ui.add_space(6.0);
+
+                    let browse_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new("📁  Обзор...")
+                                .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
+                                .size(11.5)
+                                .strong(),
+                        )
+                        .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
+                        .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                        .min_size(Vec2::new(88.0, 26.0)),
+                    );
+                    if browse_btn.clicked() {
+                        if let Some(picked) = crate::ui::pick_folder() {
+                            *path_edit_buffer = picked.to_string_lossy().to_string();
+                            state_lock.write().output_dir = picked.clone();
+                            let _ = action_tx.send(UiAction::SetOutputDir(picked));
+                        }
+                    }
 
                     ui.add_space(6.0);
 
@@ -1289,7 +1559,7 @@ impl OmniClipApp {
                         )
                         .fill(M3Theme::EGUI_PRIMARY)
                         .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
-                        .min_size(Vec2::new(88.0, 28.0)),
+                        .min_size(Vec2::new(80.0, 26.0)),
                     );
                     if apply_btn.clicked() || (path_edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                         let new_path = PathBuf::from(&*path_edit_buffer);
@@ -1302,13 +1572,12 @@ impl OmniClipApp {
                     let open_btn = ui.add(
                         egui::Button::new(
                             RichText::new(format!("{}  В Проводнике", M3Icon::OPEN_EXTERNAL))
-                                .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
-                                .size(11.5)
-                                .strong(),
+                                .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                .size(11.5),
                         )
-                        .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
+                        .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
                         .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
-                        .min_size(Vec2::new(130.0, 28.0)),
+                        .min_size(Vec2::new(120.0, 26.0)),
                     );
                     if open_btn.clicked() {
                         let _ = std::process::Command::new("explorer")
@@ -1321,21 +1590,47 @@ impl OmniClipApp {
 
                 Self::row(ui, |ui| {
                     ui.allocate_ui_with_layout(
-                        Vec2::new(140.0, 28.0),
+                        Vec2::new(180.0, 26.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.label(RichText::new("Шаблон имени файла:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                            ui.label(RichText::new("Шаблон имени файла:").color(M3Theme::EGUI_ON_SURFACE).size(12.0));
                         },
                     );
                     let mut pattern = state.filename_pattern.clone();
                     if ui.add(
                         egui::TextEdit::singleline(&mut pattern)
-                            .desired_width(240.0)
-                            .min_size(Vec2::new(0.0, 28.0))
-                            .margin(egui::vec2(8.0, 5.0)),
+                            .desired_width(280.0)
+                            .min_size(Vec2::new(0.0, 26.0))
+                            .margin(egui::vec2(8.0, 4.0)),
                     ).changed() {
-                        state_lock.write().filename_pattern = pattern;
+                        state_lock.write().filename_pattern = pattern.clone();
+                        let _ = action_tx.send(UiAction::SetFilenamePattern(pattern));
                     }
+                });
+
+                // Live dynamic template preview
+                let preview_path = crate::muxer::Mp4Muxer::format_replay_filename(
+                    &state.filename_pattern,
+                    &state.output_dir,
+                    1920,
+                    1080,
+                    state.target_fps,
+                );
+                let preview_name = preview_path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+                Self::row(ui, |ui| {
+                    ui.allocate_ui_with_layout(
+                        Vec2::new(180.0, 20.0),
+                        Layout::left_to_right(Align::Center),
+                        |ui| {
+                            ui.label(RichText::new("Предпросмотр имени:").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
+                        },
+                    );
+                    ui.label(
+                        RichText::new(format!("📝 {}", preview_name))
+                            .color(M3Theme::EGUI_PRIMARY)
+                            .size(11.5)
+                            .strong(),
+                    );
                 });
 
                 ui.add_space(8.0);
@@ -1370,45 +1665,66 @@ impl OmniClipApp {
                         egui::Frame::NONE
                             .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
                             .corner_radius(CornerRadius::same(M3Theme::RADIUS_SM_U8))
-                            .inner_margin(egui::vec2(10.0, 5.0))
+                            .inner_margin(egui::vec2(12.0, 8.0))
                             .show(ui, |ui| {
-                                let clip_w = ui.available_width();
-                                ui.allocate_space(Vec2::new(clip_w, 0.0));
-                                Self::row(ui, |ui| {
-                                    ui.label(
-                                        RichText::new(M3Icon::VIDEO)
-                                            .color(M3Theme::EGUI_PRIMARY)
-                                            .size(12.0),
-                                    );
-                                    ui.label(
-                                        RichText::new(&clip.filename)
-                                            .color(M3Theme::EGUI_ON_SURFACE)
-                                            .size(12.0)
-                                            .strong(),
-                                    );
-                                    ui.label(
-                                        RichText::new(format!("• {}с • {:.1} МБ", clip.duration_secs, clip.size_mb))
-                                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
-                                            .size(11.0),
-                                    );
-
-                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                        let show_btn = ui.add(
-                                            egui::Button::new(
-                                                RichText::new(format!("{}  Открыть", M3Icon::OPEN_EXTERNAL))
-                                                    .color(M3Theme::EGUI_PRIMARY)
-                                                    .size(11.0),
-                                            )
-                                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
-                                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_XS_U8)),
+                                ui.set_min_width(ui.available_width());
+                                ui.set_max_width(ui.available_width());
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(ui.available_width(), 26.0),
+                                    Layout::left_to_right(Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(M3Icon::VIDEO)
+                                                .color(M3Theme::EGUI_PRIMARY)
+                                                .size(12.5),
                                         );
-                                        if show_btn.clicked() {
-                                            let _ = std::process::Command::new("explorer")
-                                                .args(["/select,", &clip.filepath.to_string_lossy()])
-                                                .spawn();
-                                        }
-                                    });
-                                });
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(&clip.filename)
+                                                .color(M3Theme::EGUI_ON_SURFACE)
+                                                .size(12.0)
+                                                .strong(),
+                                        );
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new("·")
+                                                .color(M3Theme::EGUI_OUTLINE)
+                                                .size(12.0),
+                                        );
+                                        ui.add_space(6.0);
+                                        egui::Frame::NONE
+                                            .fill(M3Theme::EGUI_SURFACE_CONTAINER)
+                                            .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
+                                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                            .inner_margin(egui::vec2(8.0, 3.0))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{}с · {:.1} МБ", clip.duration_secs, clip.size_mb))
+                                                        .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                                        .size(11.0),
+                                                );
+                                            });
+
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            let show_btn = ui.add(
+                                                egui::Button::new(
+                                                    RichText::new(format!("{}  Открыть", M3Icon::OPEN_EXTERNAL))
+                                                        .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
+                                                        .size(11.5)
+                                                        .strong(),
+                                                )
+                                                .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
+                                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                                .min_size(Vec2::new(0.0, 24.0)),
+                                            );
+                                            if show_btn.clicked() {
+                                                let _ = std::process::Command::new("explorer")
+                                                    .args(["/select,", &clip.filepath.to_string_lossy()])
+                                                    .spawn();
+                                            }
+                                        });
+                                    },
+                                );
                             });
                         ui.add_space(4.0);
                     }
@@ -1510,6 +1826,7 @@ mod tests {
     #[test]
     fn test_row_vertical_alignment() {
         let ctx = egui::Context::default();
+        M3Theme::apply_m3_style(&ctx);
         let _ = ctx.run(Default::default(), |ctx| {
             egui::CentralPanel::default().show(ctx, |ui| {
                 OmniClipApp::row(ui, |ui| {
@@ -1518,16 +1835,29 @@ mod tests {
                     let r_edit = ui.add(
                         egui::TextEdit::singleline(&mut text)
                             .desired_width(200.0)
-                            .min_size(egui::vec2(0.0, 28.0))
-                            .margin(egui::vec2(8.0, 5.0)),
+                            .min_size(egui::vec2(0.0, 26.0))
+                            .margin(egui::vec2(8.0, 4.0)),
                     ).rect;
                     let r_btn = ui.add(
                         egui::Button::new("Применить")
-                            .min_size(egui::vec2(88.0, 28.0)),
+                            .min_size(egui::vec2(88.0, 26.0)),
                     ).rect;
-                    assert!((r_lbl.center().y - r_edit.center().y).abs() < 0.5);
-                    assert!((r_lbl.center().y - r_btn.center().y).abs() < 0.5);
+                    assert!((r_lbl.center().y - r_edit.center().y).abs() < 1.0);
+                    assert!((r_lbl.center().y - r_btn.center().y).abs() < 1.0);
                 });
+            });
+        });
+    }
+
+    #[test]
+    fn test_slider_row_alignment() {
+        let ctx = egui::Context::default();
+        M3Theme::apply_m3_style(&ctx);
+        let _ = ctx.run(Default::default(), |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                let mut fps = 60;
+                let changed = OmniClipApp::slider_row(ui, "Точный FPS:", &mut fps, 15..=240, Some(1.0), "60 FPS", 64.0);
+                assert!(!changed);
             });
         });
     }

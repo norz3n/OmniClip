@@ -242,8 +242,8 @@ impl M3Theme {
         visuals.selection.stroke = egui::Stroke::new(1.0_f32, Self::EGUI_PRIMARY);
 
         style.visuals = visuals;
-        style.spacing.item_spacing = egui::vec2(10.0, 10.0);
-        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.item_spacing = egui::vec2(10.0, 8.0);
+        style.spacing.button_padding = egui::vec2(12.0, 5.0);
 
         ctx.set_style(style);
     }
@@ -279,6 +279,8 @@ impl M3Icon {
     pub const CHECK: &'static str = "\u{E73E}";
     /// Open in Explorer icon (U+E8DA).
     pub const OPEN_EXTERNAL: &'static str = "\u{E8DA}";
+    /// Refresh icon (U+E72C).
+    pub const REFRESH: &'static str = "\u{E72C}";
 }
 
 #[cfg(test)]

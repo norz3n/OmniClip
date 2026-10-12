@@ -76,9 +76,13 @@ impl Mp4Muxer {
                 .map_err(|e| anyhow!("Failed to set video input media type on SinkWriter: {}", e))?;
         }
 
-        // Configure Audio Stream (AAC Passthrough) if audio chunks are present
-        let mut aud_stream_idx = None;
+        // Configure Audio Stream (AAC Passthrough) with multi-track support
+        let has_multi_track = snapshot.audio_chunks.iter().any(|c| c.track_index == 1);
+        let mut aud_stream_0_idx = None;
+        let mut aud_stream_1_idx = None;
+
         if !snapshot.audio_chunks.is_empty() {
+            // Track 0: System / Game Audio
             let aud_type: IMFMediaType = unsafe { MFCreateMediaType()? };
             unsafe {
                 aud_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
@@ -89,19 +93,46 @@ impl Mp4Muxer {
                 aud_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
             }
 
-            let aud_idx = unsafe {
+            let aud_idx_0 = unsafe {
                 sink_writer
                     .AddStream(&aud_type)
-                    .map_err(|e| anyhow!("Failed to add audio stream to SinkWriter: {}", e))?
+                    .map_err(|e| anyhow!("Failed to add audio stream 0 to SinkWriter: {}", e))?
             };
 
             unsafe {
                 sink_writer
-                    .SetInputMediaType(aud_idx, &aud_type, None)
-                    .map_err(|e| anyhow!("Failed to set audio input media type on SinkWriter: {}", e))?;
+                    .SetInputMediaType(aud_idx_0, &aud_type, None)
+                    .map_err(|e| anyhow!("Failed to set audio input media type 0 on SinkWriter: {}", e))?;
             }
 
-            aud_stream_idx = Some(aud_idx);
+            aud_stream_0_idx = Some(aud_idx_0);
+
+            // Track 1: Microphone Audio if separate tracks are present
+            if has_multi_track {
+                let aud_type_mic: IMFMediaType = unsafe { MFCreateMediaType()? };
+                unsafe {
+                    aud_type_mic.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+                    aud_type_mic.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
+                    aud_type_mic.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, snapshot.audio_sample_rate)?;
+                    aud_type_mic.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, snapshot.audio_channels)?;
+                    aud_type_mic.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, 192_000 / 8)?;
+                    aud_type_mic.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+                }
+
+                let aud_idx_1 = unsafe {
+                    sink_writer
+                        .AddStream(&aud_type_mic)
+                        .map_err(|e| anyhow!("Failed to add audio stream 1 (Mic) to SinkWriter: {}", e))?
+                };
+
+                unsafe {
+                    sink_writer
+                        .SetInputMediaType(aud_idx_1, &aud_type_mic, None)
+                        .map_err(|e| anyhow!("Failed to set audio input media type 1 on SinkWriter: {}", e))?;
+                }
+
+                aud_stream_1_idx = Some(aud_idx_1);
+            }
         }
 
         // Begin Muxing
@@ -150,14 +181,19 @@ impl Mp4Muxer {
                         chunk.is_keyframe,
                     )?;
                 }
-            } else if let Some(aud_idx) = aud_stream_idx {
+            } else if let Some(aud_idx_0) = aud_stream_0_idx {
                 let chunk = &snapshot.audio_chunks[a_idx];
                 a_idx += 1;
+                let target_stream = if chunk.track_index == 1 {
+                    aud_stream_1_idx.unwrap_or(aud_idx_0)
+                } else {
+                    aud_idx_0
+                };
                 let rel_pts = chunk.pts_hns.saturating_sub(base_pts);
                 unsafe {
                     Self::write_chunk_sample(
                         &sink_writer,
-                        aud_idx,
+                        target_stream,
                         &chunk.data,
                         rel_pts,
                         chunk.duration_hns,
@@ -182,27 +218,91 @@ impl Mp4Muxer {
             .unwrap_or(0);
 
         info!(
-            "Muxed replay to '{}' in {:.2?} ({:.2} MB, {} video chunks, {} audio chunks)",
+            "Muxed replay to '{}' in {:.2?} ({:.2} MB, {} video chunks, {} audio chunks{})",
             destination_path.display(),
             elapsed,
             file_size as f64 / (1024.0 * 1024.0),
             snapshot.video_chunks.len(),
-            snapshot.audio_chunks.len()
+            snapshot.audio_chunks.len(),
+            if has_multi_track { ", multi-track enabled" } else { "" }
         );
 
         Ok(destination_path.to_path_buf())
     }
 
-    /// Generates a standardized timestamp-based replay filename.
-    pub fn generate_replay_filename(output_dir: &Path) -> PathBuf {
-        let now = std::time::SystemTime::now();
-        let datetime = match now.duration_since(std::time::UNIX_EPOCH) {
-            Ok(d) => d.as_secs(),
-            Err(_) => 0,
+    /// Expands a filename pattern into a sanitized `.mp4` file path inside `output_dir`.
+    pub fn format_replay_filename(
+        pattern: &str,
+        output_dir: &Path,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> PathBuf {
+        let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+
+        let year = format!("{:04}", st.wYear);
+        let month = format!("{:02}", st.wMonth);
+        let day = format!("{:02}", st.wDay);
+        let hour = format!("{:02}", st.wHour);
+        let minute = format!("{:02}", st.wMinute);
+        let second = format!("{:02}", st.wSecond);
+        let date_str = format!("{}-{}-{}", year, month, day);
+        let time_str = format!("{}-{}-{}", hour, minute, second);
+        let res_str = format!("{}x{}", width, height);
+        let fps_str = format!("{}fps", fps);
+
+        let now_unix = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => d.as_secs().to_string(),
+            Err(_) => "0".to_string(),
         };
 
-        // Format: Replay_<unix_timestamp>.mp4
-        output_dir.join(format!("Replay_{}.mp4", datetime))
+        let mut name = if pattern.trim().is_empty() {
+            "Replay_%Y-%m-%d_%H-%M-%S".to_string()
+        } else {
+            pattern.to_string()
+        };
+
+        name = name
+            .replace("%Y", &year)
+            .replace("%m", &month)
+            .replace("%d", &day)
+            .replace("%H", &hour)
+            .replace("%M", &minute)
+            .replace("%S", &second)
+            .replace("{date}", &date_str)
+            .replace("{time}", &time_str)
+            .replace("{year}", &year)
+            .replace("{month}", &month)
+            .replace("{day}", &day)
+            .replace("{hour}", &hour)
+            .replace("{minute}", &minute)
+            .replace("{second}", &second)
+            .replace("{resolution}", &res_str)
+            .replace("{fps}", &fps_str)
+            .replace("{id}", &now_unix);
+
+        // Sanitize illegal Windows filename characters (< > : " / \ | ? *)
+        let sanitized: String = name
+            .chars()
+            .map(|c| match c {
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' => '_',
+                c if c.is_control() => '_',
+                c => c,
+            })
+            .collect();
+
+        let final_filename = if sanitized.to_lowercase().ends_with(".mp4") {
+            sanitized
+        } else {
+            format!("{}.mp4", sanitized)
+        };
+
+        output_dir.join(final_filename)
+    }
+
+    /// Generates a standardized timestamp-based replay filename.
+    pub fn generate_replay_filename(output_dir: &Path) -> PathBuf {
+        Self::format_replay_filename("Replay_%Y-%m-%d_%H-%M-%S", output_dir, 1920, 1080, 60)
     }
 
     /// Writes a single encoded chunk as a Media Foundation sample.
@@ -242,5 +342,33 @@ impl Mp4Muxer {
             .map_err(|e| anyhow!("Failed to write sample: {}", e))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_replay_filename_tokens() {
+        let dir = Path::new("C:/Videos");
+        let path = Mp4Muxer::format_replay_filename("Replay_{date}_{resolution}_{fps}", dir, 1920, 1080, 60);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(filename.starts_with("Replay_"));
+        assert!(filename.contains("1920x1080"));
+        assert!(filename.contains("60fps"));
+        assert!(filename.ends_with(".mp4"));
+    }
+
+    #[test]
+    fn test_format_replay_filename_sanitization() {
+        let dir = Path::new("C:/Videos");
+        let path = Mp4Muxer::format_replay_filename("Clip:<invalid>*?|name", dir, 1920, 1080, 60);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(!filename.contains(':'));
+        assert!(!filename.contains('*'));
+        assert!(!filename.contains('?'));
+        assert!(!filename.contains('|'));
+        assert!(filename.ends_with(".mp4"));
     }
 }

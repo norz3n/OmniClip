@@ -90,6 +90,17 @@ impl AacEncoder {
         pts_hns: i64,
         duration_hns: i64,
     ) -> Result<Vec<AudioChunk>> {
+        self.encode_pcm_with_track(pcm_bytes, pts_hns, duration_hns, 0)
+    }
+
+    /// Encodes a raw 16-bit interleaved PCM buffer into zero or more compressed AAC chunks with specified track index.
+    pub fn encode_pcm_with_track(
+        &mut self,
+        pcm_bytes: &[u8],
+        pts_hns: i64,
+        duration_hns: i64,
+        track_index: u8,
+    ) -> Result<Vec<AudioChunk>> {
         let media_buf: IMFMediaBuffer = unsafe {
             MFCreateMemoryBuffer(pcm_bytes.len() as u32)
                 .map_err(|e| anyhow!("Failed to create audio memory buffer: {}", e))?
@@ -121,12 +132,17 @@ impl AacEncoder {
                 .map_err(|e| anyhow!("AAC encoder ProcessInput failed: {}", e))?;
         }
 
-        // Drain available AAC outputs
-        self.drain_outputs()
+        // Drain available AAC outputs with target track index
+        self.drain_outputs_with_track(track_index)
     }
 
     /// Drains all available compressed AAC samples from the encoder.
     pub fn drain_outputs(&mut self) -> Result<Vec<AudioChunk>> {
+        self.drain_outputs_with_track(0)
+    }
+
+    /// Drains all available compressed AAC samples from the encoder with specified track index.
+    pub fn drain_outputs_with_track(&mut self, track_index: u8) -> Result<Vec<AudioChunk>> {
         let mut chunks = Vec::new();
 
         loop {
@@ -186,6 +202,7 @@ impl AacEncoder {
                                 let _ = buf.Unlock();
                             }
                             chunks.push(AudioChunk {
+                                track_index,
                                 pts_hns: pts,
                                 duration_hns: duration,
                                 data,

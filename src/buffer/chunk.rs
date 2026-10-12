@@ -24,6 +24,8 @@ impl VideoChunk {
 /// A single encoded AAC audio packet.
 #[derive(Debug, Clone)]
 pub struct AudioChunk {
+    /// Track index (0 = System / Game Audio, 1 = Microphone).
+    pub track_index: u8,
     /// Presentation timestamp in Media Foundation HNS (100 ns).
     pub pts_hns: i64,
     /// Duration of the audio frame in HNS.
