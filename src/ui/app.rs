@@ -205,17 +205,23 @@ impl OmniClipApp {
             // Pulsing live status indicator dot
             let pulse_alpha = ((self.pulse_phase.sin() * 0.4 + 0.6) * 255.0) as u8;
             let (status_color, status_text) = if state.manual_record_active {
+                let text = if let Some(start) = state.manual_record_start {
+                    let s = start.elapsed().as_secs();
+                    format!("ЗАПИСЬ {:02}:{:02}", s / 60, s % 60)
+                } else {
+                    "ЗАПИСЬ".to_string()
+                };
                 (
                     Color32::from_rgba_premultiplied(255, 82, 82, pulse_alpha),
-                    "ИДЕТ ЗАПИСЬ НА ДИСК",
+                    text,
                 )
             } else if state.replay_buffer_active {
                 (
                     Color32::from_rgba_premultiplied(76, 175, 80, pulse_alpha),
-                    "БУФЕР АКТИВЕН",
+                    "БУФЕР АКТИВЕН".to_string(),
                 )
             } else {
-                (M3Theme::EGUI_OUTLINE, "ОЖИДАНИЕ")
+                (M3Theme::EGUI_OUTLINE, "ОЖИДАНИЕ".to_string())
             };
 
             // Real smooth anti-aliased glowing LED circle
@@ -746,7 +752,7 @@ impl OmniClipApp {
                                 .strong(),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let chip_txt = if state.manual_record_active { "ЗАПИСЬ" } else { "ГОТОВ" };
+                            let chip_txt = if state.manual_record_active { "● ЗАПИСЬ" } else { "ГОТОВ" };
                             let chip_col = if state.manual_record_active {
                                 M3Theme::EGUI_STATUS_RED
                             } else {
@@ -785,20 +791,30 @@ impl OmniClipApp {
                             .min_size(Vec2::new(ui.available_width(), 44.0)),
                     );
                     if rec_btn.clicked() {
-                        let mut st = self.state.write();
-                        st.manual_record_active = !st.manual_record_active;
                         let _ = self.action_tx.send(UiAction::ToggleManualRecord);
                     }
 
                     ui.add_space(14.0);
-                    let status_lbl = if state.manual_record_active {
-                        "● Идет непрерывная аппаратная запись в MP4"
+                    let (status_lbl, status_color) = if state.manual_record_active {
+                        let timer_part = if let Some(start) = state.manual_record_start {
+                            let s = start.elapsed().as_secs();
+                            format!(" {:02}:{:02}", s / 60, s % 60)
+                        } else {
+                            String::new()
+                        };
+                        (
+                            format!("● Идет запись:{} (Alt+F9 для остановки)", timer_part),
+                            M3Theme::EGUI_STATUS_RED,
+                        )
                     } else {
-                        "Статус: В ожидании запуска по горячей клавише Alt+F9"
+                        (
+                            "Статус: В ожидании запуска по горячей клавише Alt+F9".to_string(),
+                            M3Theme::EGUI_ON_SURFACE_VARIANT,
+                        )
                     };
                     ui.label(
                         RichText::new(status_lbl)
-                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                            .color(status_color)
                             .size(12.0),
                     );
 

@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::Arc;
 use parking_lot::Mutex;
 use log::debug;
@@ -244,6 +245,69 @@ impl RingBuffer {
     }
 }
 
+/// Manages a continuous manual recording session, aggregating video and audio streams
+/// directly into a RingBufferSnapshot once an initial IDR keyframe arrives.
+pub struct ManualRecordSession {
+    pub target_file: PathBuf,
+    pub video_chunks: Vec<VideoChunk>,
+    pub audio_chunks: Vec<AudioChunk>,
+    pub waiting_for_keyframe: bool,
+}
+
+impl ManualRecordSession {
+    /// Creates a new continuous recording session targeting `target_file`.
+    pub fn new(target_file: PathBuf) -> Self {
+        Self {
+            target_file,
+            video_chunks: Vec::new(),
+            audio_chunks: Vec::new(),
+            waiting_for_keyframe: true,
+        }
+    }
+
+    /// Pushes a video chunk into the session. Pre-keyframe chunks are discarded
+    /// to ensure the output MP4 begins with a valid IDR frame.
+    pub fn push_video(&mut self, chunk: VideoChunk) {
+        if self.waiting_for_keyframe {
+            if chunk.is_keyframe {
+                self.waiting_for_keyframe = false;
+                self.video_chunks.push(chunk);
+            }
+        } else {
+            self.video_chunks.push(chunk);
+        }
+    }
+
+    /// Pushes an audio chunk into the session.
+    pub fn push_audio(&mut self, chunk: AudioChunk) {
+        self.audio_chunks.push(chunk);
+    }
+
+    /// Finalizes the recording session and produces a snapshot for the disk writer if video was recorded.
+    pub fn finish(
+        self,
+        width: u32,
+        height: u32,
+        fps: u32,
+        audio_sample_rate: u32,
+        audio_channels: u32,
+    ) -> Option<(RingBufferSnapshot, PathBuf)> {
+        if self.video_chunks.is_empty() {
+            return None;
+        }
+        let snapshot = RingBufferSnapshot {
+            video_chunks: self.video_chunks,
+            audio_chunks: self.audio_chunks,
+            width,
+            height,
+            fps,
+            audio_sample_rate,
+            audio_channels,
+        };
+        Some((snapshot, self.target_file))
+    }
+}
+
 /// Thread-safe reference-counted RingBuffer wrapper.
 pub type SharedRingBuffer = Arc<Mutex<RingBuffer>>;
 
@@ -425,5 +489,64 @@ mod tests {
             data: vec![7, 8, 9],
         });
         assert_eq!(rb.video_count(), 3);
+    }
+
+    #[test]
+    fn test_manual_session_discards_pre_keyframe_and_finishes() {
+        let mut session = ManualRecordSession::new(PathBuf::from("test_manual.mp4"));
+
+        // Push audio before keyframe
+        session.push_audio(AudioChunk {
+            pts_hns: 50,
+            duration_hns: 200_000,
+            data: vec![1, 2],
+            track_index: 0,
+        });
+
+        // Non-keyframe video should be ignored
+        session.push_video(VideoChunk {
+            is_keyframe: false,
+            pts_hns: 80,
+            dts_hns: 80,
+            duration_hns: 166_666,
+            data: vec![3, 4],
+        });
+        assert!(session.waiting_for_keyframe);
+        assert_eq!(session.video_chunks.len(), 0);
+
+        // Keyframe unlocks the session
+        session.push_video(VideoChunk {
+            is_keyframe: true,
+            pts_hns: 100,
+            dts_hns: 100,
+            duration_hns: 166_666,
+            data: vec![5, 6],
+        });
+        assert!(!session.waiting_for_keyframe);
+        assert_eq!(session.video_chunks.len(), 1);
+
+        // Subsequent non-keyframe is recorded
+        session.push_video(VideoChunk {
+            is_keyframe: false,
+            pts_hns: 200,
+            dts_hns: 200,
+            duration_hns: 166_666,
+            data: vec![7, 8],
+        });
+        assert_eq!(session.video_chunks.len(), 2);
+
+        let (snapshot, path) = session
+            .finish(1920, 1080, 60, 48000, 2)
+            .expect("session should produce snapshot");
+        assert_eq!(path, PathBuf::from("test_manual.mp4"));
+        assert_eq!(snapshot.video_chunks.len(), 2);
+        assert_eq!(snapshot.audio_chunks.len(), 1);
+        assert!(snapshot.video_chunks[0].is_keyframe);
+    }
+
+    #[test]
+    fn test_manual_session_empty_returns_none() {
+        let session = ManualRecordSession::new(PathBuf::from("test_manual.mp4"));
+        assert!(session.finish(1920, 1080, 60, 48000, 2).is_none());
     }
 }

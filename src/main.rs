@@ -2,13 +2,15 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use anyhow::Result;
 use log::info;
 use windows::Win32::Foundation::BOOL;
 
 use omni_clip::audio::WasapiLoopbackCapture;
-use omni_clip::buffer::{create_shared_ring_buffer, RingBufferSnapshot};
+use omni_clip::buffer::{
+    create_shared_ring_buffer, ManualRecordSession, RingBufferSnapshot,
+};
 use omni_clip::capture::{CaptureStatus, D3D11Context, DxgiDuplicator};
 use omni_clip::config::Config;
 use omni_clip::encoder::{DxgiDeviceManager, H264Encoder, MfPlatformGuard};
@@ -216,13 +218,10 @@ fn main() -> Result<()> {
                     }
                     Ok(HotkeyEvent::ToggleRecord) => {
                         info!("Hotkey dispatch: ToggleManualRecord → capture thread");
-                        let active = {
-                            let mut st = ui_state_hk.write();
-                            st.manual_record_active = !st.manual_record_active;
-                            st.manual_record_active
-                        };
-                        info!("Manual recording: {}", if active { "started" } else { "stopped" });
                         let _ = ui_action_tx_hk.send(UiAction::ToggleManualRecord);
+                        if let Some(ctx) = egui_ctx_hk.lock().as_ref() {
+                            ctx.request_repaint();
+                        }
                     }
                     Ok(HotkeyEvent::ToggleOverlay) => {
                         info!("Hotkey dispatch: ToggleOverlay");
@@ -251,6 +250,7 @@ fn main() -> Result<()> {
     let config_clone = config.clone();
     let ui_state_clone = ui_state.clone();
     let running_capture = running.clone();
+    let egui_ctx_capture = egui_ctx_shared.clone();
 
     let capture_handle = thread::Builder::new()
         .name("omniclip-capture".to_string())
@@ -280,10 +280,14 @@ fn main() -> Result<()> {
                 let frame_duration_hns = config_clone.frame_duration_hns();
                 let mut captured_frames = 0u64;
                 let mut encoded_chunks = 0u64;
+                let mut manual_session: Option<ManualRecordSession> = None;
 
                 while running_capture.load(Ordering::Relaxed) {
-                    // Drain incoming audio packets into ring buffer
+                    // Drain incoming audio packets into ring buffer and manual recording session
                     while let Ok(audio_chunk) = audio_rx.try_recv() {
+                        if let Some(ref mut session) = manual_session {
+                            session.push_audio(audio_chunk.clone());
+                        }
                         ring_buffer_capture.lock().push_audio(audio_chunk);
                     }
 
@@ -310,6 +314,68 @@ fn main() -> Result<()> {
                                 } else {
                                     log::warn!("Ring buffer not ready yet (waiting for keyframe)");
                                     ui_state_clone.write().is_saving_disk = false;
+                                }
+                            }
+                            UiAction::ToggleManualRecord => {
+                                if manual_session.is_none() {
+                                    // Start manual recording
+                                    let (pattern, out_dir) = {
+                                        let st = ui_state_clone.read();
+                                        (st.filename_pattern.clone(), st.output_dir.clone())
+                                    };
+                                    let rec_pattern = if pattern.starts_with("Replay_") {
+                                        pattern.replacen("Replay_", "Record_", 1)
+                                    } else {
+                                        format!("Record_{}", pattern)
+                                    };
+                                    let target_file = Mp4Muxer::format_replay_filename(
+                                        &rec_pattern,
+                                        &out_dir,
+                                        width,
+                                        height,
+                                        fps,
+                                    );
+                                    info!("Capture thread: Starting manual recording -> '{}'", target_file.display());
+                                    manual_session = Some(ManualRecordSession::new(target_file));
+                                    {
+                                        let mut st = ui_state_clone.write();
+                                        st.manual_record_active = true;
+                                        st.manual_record_start = Some(Instant::now());
+                                    }
+                                    if let Some(ctx) = egui_ctx_capture.lock().as_ref() {
+                                        ctx.request_repaint();
+                                    }
+                                    encoder.request_keyframe();
+                                } else {
+                                    // Stop manual recording
+                                    info!("Capture thread: Stopping manual recording...");
+                                    {
+                                        let mut st = ui_state_clone.write();
+                                        st.manual_record_active = false;
+                                        st.manual_record_start = None;
+                                    }
+                                    if let Some(ctx) = egui_ctx_capture.lock().as_ref() {
+                                        ctx.request_repaint();
+                                    }
+                                    if let Some(session) = manual_session.take() {
+                                        if let Some((snapshot, target_file)) = session.finish(
+                                            width,
+                                            height,
+                                            fps,
+                                            config_clone.audio_sample_rate,
+                                            config_clone.audio_channels,
+                                        ) {
+                                            info!(
+                                                "Manual recording finished: {} video chunks ({:.1}s), {} audio chunks. Dispatching to disk writer...",
+                                                snapshot.video_chunks.len(),
+                                                snapshot.duration_hns() as f64 / 10_000_000.0,
+                                                snapshot.audio_chunks.len(),
+                                            );
+                                            let _ = dump_tx_capture.send((snapshot, target_file));
+                                        } else {
+                                            log::warn!("Manual recording ended without video keyframes");
+                                        }
+                                    }
                                 }
                             }
                             UiAction::SetBufferDuration(secs) => {
@@ -340,7 +406,6 @@ fn main() -> Result<()> {
                             UiAction::QuitApplication => {
                                 running_capture.store(false, Ordering::SeqCst);
                             }
-                            _ => {}
                         }
                     }
 
@@ -358,6 +423,9 @@ fn main() -> Result<()> {
                                 let mut rb = ring_buffer_capture.lock();
                                 for chunk in chunks {
                                     encoded_chunks += 1;
+                                    if let Some(ref mut session) = manual_session {
+                                        session.push_video(chunk.clone());
+                                    }
                                     rb.push_video(chunk);
                                 }
                             }
@@ -370,6 +438,9 @@ fn main() -> Result<()> {
                                 let mut rb = ring_buffer_capture.lock();
                                 for chunk in chunks {
                                     encoded_chunks += 1;
+                                    if let Some(ref mut session) = manual_session {
+                                        session.push_video(chunk.clone());
+                                    }
                                     rb.push_video(chunk);
                                 }
                             }
@@ -382,6 +453,25 @@ fn main() -> Result<()> {
                             log::error!("D3D11 device removed");
                             break;
                         }
+                    }
+                }
+
+                // If manual recording was active when shutting down, save it
+                if let Some(session) = manual_session.take() {
+                    {
+                        let mut st = ui_state_clone.write();
+                        st.manual_record_active = false;
+                        st.manual_record_start = None;
+                    }
+                    if let Some((snapshot, target_file)) = session.finish(
+                        width,
+                        height,
+                        fps,
+                        config_clone.audio_sample_rate,
+                        config_clone.audio_channels,
+                    ) {
+                        info!("Saving in-progress manual recording on capture thread exit...");
+                        let _ = dump_tx_capture.send((snapshot, target_file));
                     }
                 }
 
