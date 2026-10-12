@@ -162,10 +162,9 @@ impl RingBuffer {
         }
 
         // Verify IDR alignment invariant
-        assert!(
-            self.video_chunks.front().unwrap().is_keyframe,
-            "Ring buffer front chunk must be an IDR keyframe"
-        );
+        if !self.video_chunks.front()?.is_keyframe {
+            return None;
+        }
 
         Some(RingBufferSnapshot {
             video_chunks: self.video_chunks.iter().cloned().collect(),
@@ -192,10 +191,9 @@ impl RingBuffer {
         }
 
         // Verify IDR alignment invariant
-        assert!(
-            self.video_chunks.front().unwrap().is_keyframe,
-            "Ring buffer front chunk must be an IDR keyframe"
-        );
+        if !self.video_chunks.front()?.is_keyframe {
+            return None;
+        }
 
         let snapshot = RingBufferSnapshot {
             video_chunks: self.video_chunks.drain(..).collect(),
@@ -388,5 +386,44 @@ mod tests {
             data: vec![7, 8, 9],
         });
         assert_eq!(rb.video_count(), 1);
+    }
+
+    #[test]
+    fn test_ring_buffer_snapshot_retains_data() {
+        let mut rb = RingBuffer::new(10_000_000, 1920, 1080, 60, 48000, 2);
+
+        rb.push_video(VideoChunk {
+            is_keyframe: true,
+            pts_hns: 100,
+            dts_hns: 100,
+            duration_hns: 166_666,
+            data: vec![1, 2, 3],
+        });
+        rb.push_video(VideoChunk {
+            is_keyframe: false,
+            pts_hns: 200,
+            dts_hns: 200,
+            duration_hns: 166_666,
+            data: vec![4, 5, 6],
+        });
+
+        assert_eq!(rb.video_count(), 2);
+        let bytes_before = rb.total_bytes();
+
+        // Calling snapshot must NOT drain or reset buffer
+        let snap = rb.snapshot().expect("snapshot should exist");
+        assert_eq!(snap.video_chunks.len(), 2);
+        assert_eq!(rb.video_count(), 2);
+        assert_eq!(rb.total_bytes(), bytes_before);
+
+        // Next non-keyframe must be accepted normally
+        rb.push_video(VideoChunk {
+            is_keyframe: false,
+            pts_hns: 300,
+            dts_hns: 300,
+            duration_hns: 166_666,
+            data: vec![7, 8, 9],
+        });
+        assert_eq!(rb.video_count(), 3);
     }
 }

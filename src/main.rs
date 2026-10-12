@@ -132,6 +132,11 @@ fn main() -> Result<()> {
     // Channel to notify UI thread when disk writer saves a replay
     let (save_notify_tx, save_notify_rx) = crossbeam_channel::unbounded::<(PathBuf, u32, f64)>();
 
+    // Spawn dedicated on-screen HUD toast overlay thread
+    if let Err(e) = omni_clip::ui::spawn_hud_toast_thread() {
+        log::warn!("Failed to spawn HUD toast thread: {}", e);
+    }
+
     // Background Disk Writer thread
     let (dump_tx, dump_rx) = crossbeam_channel::unbounded::<RingBufferSnapshot>();
     let output_dir_clone = config.output_dir.clone();
@@ -148,7 +153,8 @@ fn main() -> Result<()> {
                         let size_mb = std::fs::metadata(&path)
                             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
                             .unwrap_or(0.0);
-                        let _ = save_notify_tx.send((path, duration_secs, size_mb));
+                        let _ = save_notify_tx.send((path.clone(), duration_secs, size_mb));
+                        omni_clip::ui::show_hud_toast(path, duration_secs, size_mb);
                         if let Some(ctx) = egui_ctx_writer.lock().as_ref() {
                             ctx.request_repaint();
                         }
@@ -285,10 +291,10 @@ fn main() -> Result<()> {
                         match action {
                             UiAction::SaveReplay => {
                                 info!("UI requested replay dump!");
-                                let mut rb = ring_buffer_capture.lock();
-                                if let Some(snapshot) = rb.take_snapshot() {
-                                    ui_state_clone.write().set_current_ram_bytes(0);
+                                let rb = ring_buffer_capture.lock();
+                                if let Some(snapshot) = rb.snapshot() {
                                     let _ = dump_tx_capture.send(snapshot);
+                                    encoder.request_keyframe();
                                 } else {
                                     log::warn!("Ring buffer not ready yet (waiting for keyframe)");
                                     ui_state_clone.write().is_saving_disk = false;
@@ -297,6 +303,21 @@ fn main() -> Result<()> {
                             UiAction::SetBufferDuration(secs) => {
                                 let new_hns = secs as i64 * 10_000_000i64;
                                 ring_buffer_capture.lock().set_max_duration_hns(new_hns);
+                            }
+                            UiAction::SetFps(fps) => {
+                                log::info!("UI SetFps: {} FPS requested", fps);
+                            }
+                            UiAction::SetBitrate(mbps) => {
+                                log::info!("UI SetBitrate: {} Mbps requested", mbps);
+                            }
+                            UiAction::ToggleMic => {
+                                log::info!("UI ToggleMic requested");
+                            }
+                            UiAction::SetMicVolume(vol) => {
+                                log::info!("UI SetMicVolume: {:.2} requested", vol);
+                            }
+                            UiAction::SetOutputDir(dir) => {
+                                log::info!("UI SetOutputDir: {:?} requested", dir);
                             }
                             UiAction::QuitApplication => {
                                 running_capture.store(false, Ordering::SeqCst);
@@ -365,8 +386,8 @@ fn main() -> Result<()> {
         (GetSystemMetrics(SM_CXSCREEN) as f32, GetSystemMetrics(SM_CYSCREEN) as f32)
     };
 
-    // Center a 960x560 Material Design 3 Control Hub on the primary monitor.
-    let win_w = 960.0;
+    // Center a spacious 940x560 Material Design 3 Control Hub on the primary monitor.
+    let win_w = 940.0;
     let win_h = 560.0;
     let pos_x = ((screen_w - win_w) / 2.0).max(0.0);
     let pos_y = ((screen_h - win_h) / 2.0).max(0.0);
@@ -377,7 +398,7 @@ fn main() -> Result<()> {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("OmniClip Overlay")
             .with_decorations(false)
-            .with_transparent(false)
+            .with_transparent(true)
             .with_always_on_top()
             .with_visible(false)
             .with_inner_size([win_w, win_h])

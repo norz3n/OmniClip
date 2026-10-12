@@ -54,9 +54,37 @@ impl ToastNotification {
     }
 }
 
+/// Active navigation tab in the Material Design 3 Control Hub.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HubTab {
+    /// Dashboard / Quick Action Hub (Replay + Record).
+    Dashboard,
+    /// Video Capture settings (FPS, Bitrate, Resolution).
+    Video,
+    /// Ring Buffer & RAM allocation settings.
+    Buffer,
+    /// Audio input & playback levels.
+    Audio,
+    /// Global hotkey shortcuts overview.
+    Hotkeys,
+    /// Storage folder & recent replays browser.
+    Storage,
+}
+
+/// Saved replay entry for session history.
+#[derive(Debug, Clone)]
+pub struct SavedReplayEntry {
+    pub filepath: PathBuf,
+    pub filename: String,
+    pub duration_secs: u32,
+    pub size_mb: f64,
+}
+
 /// Global UI and interactive runtime state for OmniClip.
 #[derive(Debug, Clone)]
 pub struct UiState {
+    /// Currently selected navigation tab.
+    pub active_tab: HubTab,
     /// Whether circular instant replay buffering is active.
     pub replay_buffer_active: bool,
     /// Configured circular replay buffer length in seconds (e.g. 15, 30, 60, 120, 300).
@@ -75,14 +103,67 @@ pub struct UiState {
     pub target_fps: u32,
     /// Target video bitrate in Mbps (e.g. 15, 35, 50, 80).
     pub video_bitrate_mbps: u32,
+    /// Video capture resolution preset description.
+    pub resolution_label: String,
+    /// Video encoder rate control mode (CBR, VBR, CQP).
+    pub video_rate_control: String,
+    /// Video peak / maximum bitrate in Mbps (for VBR).
+    pub video_peak_bitrate_mbps: u32,
+    /// Hardware encoder latency/quality preset.
+    pub video_encoder_preset: String,
+    /// H.264 encoding profile (High, Main, Baseline).
+    pub video_profile: String,
+    /// Keyframe interval (GOP) in seconds.
+    pub video_gop_secs: u32,
+    /// Number of consecutive B-frames (0 for lowest latency).
+    pub video_b_frames: u32,
+    /// Texture downscaling filter (Bilinear, Bicubic, Lanczos).
+    pub video_downscale_filter: String,
+    /// Video color range (Full 0-255 vs Limited 16-235).
+    pub video_color_range: String,
 
     /// Whether microphone capture is enabled.
     pub mic_enabled: bool,
-    /// Microphone volume level (0.0 to 1.0).
+    /// Microphone volume level (0.0 to 2.0).
     pub mic_volume: f32,
+    /// Whether Push-to-Talk activation mode is enabled for microphone.
+    pub mic_mode_ptt: bool,
+    /// Push-to-Talk keyboard trigger key name.
+    pub mic_ptt_key: String,
+    /// Microphone noise gate threshold in decibels (-60 dB to 0 dB).
+    pub mic_noise_gate_db: f32,
+
+    /// Master game/desktop audio loopback enabled.
+    pub game_audio_enabled: bool,
+    /// Master game/desktop audio volume (0.0 to 1.0).
+    pub game_audio_volume: f32,
+    /// Audio encoding bitrate in kbps (e.g. 128, 192, 256, 320).
+    pub audio_bitrate_kbps: u32,
+    /// Audio sampling rate in Hz (44100 or 48000).
+    pub audio_sample_rate_hz: u32,
+    /// Audio channels configuration ("Стерео (2.0)" or "Моно (1.0)").
+    pub audio_channels: String,
+    /// Whether to record game and microphone into separate audio tracks.
+    pub audio_multi_track: bool,
+
+    /// Hard RAM memory limit safety cap for circular buffer in Gigabytes.
+    pub buffer_ram_limit_gb: u32,
+    /// Whether circular replay buffer starts automatically on app launch.
+    pub buffer_autostart: bool,
+
+    /// File naming template pattern (e.g. "Replay_%Y-%m-%d_%H-%M-%S").
+    pub filename_pattern: String,
+    /// In-game HUD corner indicator position ("Верхний правый", "Нижний правый", etc.).
+    pub hud_position: String,
+    /// Whether to display live FPS in in-game HUD.
+    pub hud_show_fps: bool,
+    /// Whether to play subtle audio notification when replay is saved.
+    pub sound_notify_on_save: bool,
 
     /// Directory where saved videos are stored.
     pub output_dir: PathBuf,
+    /// Session list of recent saved replay captures.
+    pub recent_replays: Vec<SavedReplayEntry>,
 
     /// In-game HUD corner indicator visibility.
     pub hud_visible: bool,
@@ -112,6 +193,7 @@ impl UiState {
         let estimated_ram_mb = (bytes_per_sec * buffer_duration_secs as u64) / (1024 * 1024);
 
         Self {
+            active_tab: HubTab::Dashboard,
             replay_buffer_active: true,
             buffer_duration_secs,
             estimated_ram_mb: estimated_ram_mb as usize,
@@ -120,9 +202,34 @@ impl UiState {
             manual_record_start: None,
             target_fps,
             video_bitrate_mbps: bitrate_mbps,
+            resolution_label: "Исходное (Native)".to_string(),
+            video_rate_control: "CBR (Постоянный)".to_string(),
+            video_peak_bitrate_mbps: (bitrate_mbps * 3) / 2,
+            video_encoder_preset: "Ultra Low Latency (Минимум задержки)".to_string(),
+            video_profile: "High (Рекомендуется)".to_string(),
+            video_gop_secs: 1,
+            video_b_frames: 0,
+            video_downscale_filter: "Билинейный (Быстрый)".to_string(),
+            video_color_range: "Полный (Full 0-255)".to_string(),
             mic_enabled,
             mic_volume,
+            mic_mode_ptt: false,
+            mic_ptt_key: "V".to_string(),
+            mic_noise_gate_db: -45.0,
+            game_audio_enabled: true,
+            game_audio_volume: 1.0,
+            audio_bitrate_kbps: 192,
+            audio_sample_rate_hz: 48000,
+            audio_channels: "Стерео (2.0)".to_string(),
+            audio_multi_track: false,
+            buffer_ram_limit_gb: 4,
+            buffer_autostart: true,
+            filename_pattern: "Replay_%Y-%m-%d_%H-%M-%S".to_string(),
+            hud_position: "Верхний правый".to_string(),
+            hud_show_fps: true,
+            sound_notify_on_save: true,
             output_dir,
+            recent_replays: Vec::new(),
             hud_visible: true,
             hub_visible: false,
             is_saving_disk: false,
@@ -148,16 +255,29 @@ impl UiState {
         self.estimated_ram_mb = (bytes_per_sec * secs as usize) / (1024 * 1024);
     }
 
-    /// Triggers display of a new toast notification.
+    /// Triggers display of a new toast notification and records entry in recent history.
     pub fn push_toast(&mut self, title: impl Into<String>, filepath: PathBuf, duration_secs: u32, size_mb: f64) {
         self.toast_id_counter += 1;
-        self.active_toast = Some(ToastNotification::new(
+        let toast = ToastNotification::new(
             self.toast_id_counter,
             title,
-            filepath,
+            filepath.clone(),
             duration_secs,
             size_mb,
-        ));
+        );
+        self.recent_replays.insert(
+            0,
+            SavedReplayEntry {
+                filepath,
+                filename: toast.filename.clone(),
+                duration_secs,
+                size_mb,
+            },
+        );
+        if self.recent_replays.len() > 10 {
+            self.recent_replays.truncate(10);
+        }
+        self.active_toast = Some(toast);
     }
 
     /// Clears expired toast notification.

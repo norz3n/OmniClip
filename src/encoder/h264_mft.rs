@@ -106,6 +106,10 @@ impl H264Encoder {
             if let Ok(attrs) = transform.GetAttributes() {
                 let _ = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
             }
+            if let Ok(codec_api) = transform.cast::<windows::Win32::Media::MediaFoundation::ICodecAPI>() {
+                let var = windows::core::VARIANT::from(gop_size);
+                let _ = codec_api.SetValue(&windows::Win32::Media::MediaFoundation::CODECAPI_AVEncMPVGOPSize, &var);
+            }
         }
 
         // Bind Direct3D 11 DXGI Device Manager for hardware acceleration
@@ -215,6 +219,20 @@ impl H264Encoder {
     #[inline]
     pub fn gop_size(&self) -> u32 {
         self.gop_size
+    }
+
+    /// Requests the hardware encoder to generate an IDR keyframe on the next submitted frame.
+    pub fn request_keyframe(&self) {
+        if let Ok(codec_api) = self.transform.cast::<windows::Win32::Media::MediaFoundation::ICodecAPI>() {
+            let var = windows::core::VARIANT::from(1u32);
+            unsafe {
+                let _ = codec_api.SetValue(
+                    &windows::Win32::Media::MediaFoundation::CODECAPI_AVEncVideoForceKeyFrame,
+                    &var,
+                );
+            }
+            debug!("Forced IDR keyframe via ICodecAPI");
+        }
     }
 
     /// Returns true if the encoder currently has a credit to accept a new frame.
