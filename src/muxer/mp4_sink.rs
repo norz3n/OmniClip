@@ -37,8 +37,18 @@ impl Mp4Muxer {
             .ok_or_else(|| anyhow!("Invalid destination path string"))?;
         let url = HSTRING::from(path_str);
 
+        let attrs: IMFAttributes = unsafe {
+            let mut attrs = None;
+            MFCreateAttributes(&mut attrs, 3)?;
+            let attrs = attrs.unwrap();
+            attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
+            attrs.SetUINT32(&MF_LOW_LATENCY, 1)?;
+            attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+            attrs
+        };
+
         let sink_writer: IMFSinkWriter = unsafe {
-            MFCreateSinkWriterFromURL(&url, None, None)
+            MFCreateSinkWriterFromURL(&url, None, Some(&attrs))
                 .map_err(|e| anyhow!("Failed to create SinkWriter for '{}': {}", path_str, e))?
         };
 
@@ -104,81 +114,58 @@ impl Mp4Muxer {
         // Normalize timestamps relative to the first video frame (t = 0)
         let base_pts = snapshot.video_chunks.first().unwrap().pts_hns;
 
-        // Write Video Samples
-        for chunk in &snapshot.video_chunks {
-            let relative_pts = chunk.pts_hns.saturating_sub(base_pts);
+        // Chronologically interleaved streaming:
+        // Feeding video and audio interleaved by PTS ensures the MP4 container never has
+        // to buffer huge streams in memory or back-seek on disk during Finalize().
+        let mut v_idx = 0;
+        let mut a_idx = 0;
+        let v_len = snapshot.video_chunks.len();
+        let a_len = snapshot.audio_chunks.len();
 
-            let media_buf: IMFMediaBuffer = unsafe {
-                MFCreateMemoryBuffer(chunk.data.len() as u32)
-                    .map_err(|e| anyhow!("Failed to create memory buffer for video sample: {}", e))?
-            };
-
-            let mut ptr: *mut u8 = std::ptr::null_mut();
-            let mut max_len = 0u32;
-            let mut cur_len = 0u32;
-            unsafe {
-                media_buf.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))?;
-                std::ptr::copy_nonoverlapping(chunk.data.as_ptr(), ptr, chunk.data.len());
-                media_buf.SetCurrentLength(chunk.data.len() as u32)?;
-                media_buf.Unlock()?;
-            }
-
-            let sample: IMFSample = unsafe {
-                MFCreateSample().map_err(|e| anyhow!("Failed to create video sample: {}", e))?
-            };
-
-            unsafe {
-                sample.AddBuffer(&media_buf)?;
-                sample.SetSampleTime(relative_pts)?;
-                sample.SetSampleDuration(chunk.duration_hns)?;
-
-                if chunk.is_keyframe {
-                    sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)?;
-                }
-
-                sink_writer
-                    .WriteSample(vid_idx, &sample)
-                    .map_err(|e| anyhow!("Failed to write video sample: {}", e))?;
-            }
+        // Skip any audio preceding base_pts
+        while a_idx < a_len && snapshot.audio_chunks[a_idx].pts_hns < base_pts {
+            a_idx += 1;
         }
 
-        // Write Audio Samples
-        if let Some(aud_idx) = aud_stream_idx {
-            for chunk in &snapshot.audio_chunks {
-                if chunk.pts_hns < base_pts {
-                    continue; // Skip audio preceding initial video keyframe
-                }
+        while v_idx < v_len || a_idx < a_len {
+            let next_is_video = if v_idx >= v_len {
+                false
+            } else if a_idx >= a_len {
+                true
+            } else {
+                snapshot.video_chunks[v_idx].pts_hns <= snapshot.audio_chunks[a_idx].pts_hns
+            };
 
-                let relative_pts = chunk.pts_hns.saturating_sub(base_pts);
-
-                let media_buf: IMFMediaBuffer = unsafe {
-                    MFCreateMemoryBuffer(chunk.data.len() as u32)
-                        .map_err(|e| anyhow!("Failed to create memory buffer for audio sample: {}", e))?
-                };
-
-                let mut ptr: *mut u8 = std::ptr::null_mut();
-                let mut max_len = 0u32;
-                let mut cur_len = 0u32;
+            if next_is_video {
+                let chunk = &snapshot.video_chunks[v_idx];
+                v_idx += 1;
+                let rel_pts = chunk.pts_hns.saturating_sub(base_pts);
                 unsafe {
-                    media_buf.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))?;
-                    std::ptr::copy_nonoverlapping(chunk.data.as_ptr(), ptr, chunk.data.len());
-                    media_buf.SetCurrentLength(chunk.data.len() as u32)?;
-                    media_buf.Unlock()?;
+                    Self::write_chunk_sample(
+                        &sink_writer,
+                        vid_idx,
+                        &chunk.data,
+                        rel_pts,
+                        chunk.duration_hns,
+                        chunk.is_keyframe,
+                    )?;
                 }
-
-                let sample: IMFSample = unsafe {
-                    MFCreateSample().map_err(|e| anyhow!("Failed to create audio sample: {}", e))?
-                };
-
+            } else if let Some(aud_idx) = aud_stream_idx {
+                let chunk = &snapshot.audio_chunks[a_idx];
+                a_idx += 1;
+                let rel_pts = chunk.pts_hns.saturating_sub(base_pts);
                 unsafe {
-                    sample.AddBuffer(&media_buf)?;
-                    sample.SetSampleTime(relative_pts)?;
-                    sample.SetSampleDuration(chunk.duration_hns)?;
-
-                    sink_writer
-                        .WriteSample(aud_idx, &sample)
-                        .map_err(|e| anyhow!("Failed to write audio sample: {}", e))?;
+                    Self::write_chunk_sample(
+                        &sink_writer,
+                        aud_idx,
+                        &chunk.data,
+                        rel_pts,
+                        chunk.duration_hns,
+                        false,
+                    )?;
                 }
+            } else {
+                a_idx += 1;
             }
         }
 
@@ -216,5 +203,44 @@ impl Mp4Muxer {
 
         // Format: Replay_<unix_timestamp>.mp4
         output_dir.join(format!("Replay_{}.mp4", datetime))
+    }
+
+    /// Writes a single encoded chunk as a Media Foundation sample.
+    #[inline]
+    unsafe fn write_chunk_sample(
+        sink_writer: &IMFSinkWriter,
+        stream_idx: u32,
+        data: &[u8],
+        relative_pts: i64,
+        duration_hns: i64,
+        is_keyframe: bool,
+    ) -> Result<()> {
+        let media_buf: IMFMediaBuffer = MFCreateMemoryBuffer(data.len() as u32)
+            .map_err(|e| anyhow!("Failed to create memory buffer: {}", e))?;
+
+        let mut ptr: *mut u8 = std::ptr::null_mut();
+        let mut max_len = 0u32;
+        let mut cur_len = 0u32;
+        media_buf.Lock(&mut ptr, Some(&mut max_len), Some(&mut cur_len))?;
+        std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+        media_buf.SetCurrentLength(data.len() as u32)?;
+        media_buf.Unlock()?;
+
+        let sample: IMFSample = MFCreateSample()
+            .map_err(|e| anyhow!("Failed to create sample: {}", e))?;
+
+        sample.AddBuffer(&media_buf)?;
+        sample.SetSampleTime(relative_pts)?;
+        sample.SetSampleDuration(duration_hns)?;
+
+        if is_keyframe {
+            sample.SetUINT32(&MFSampleExtension_CleanPoint, 1)?;
+        }
+
+        sink_writer
+            .WriteSample(stream_idx, &sample)
+            .map_err(|e| anyhow!("Failed to write sample: {}", e))?;
+
+        Ok(())
     }
 }

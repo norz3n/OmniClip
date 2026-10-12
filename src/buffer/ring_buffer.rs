@@ -196,6 +196,12 @@ impl RingBuffer {
         self.audio_chunks.len()
     }
 
+    /// Dynamically updates the maximum retention duration in HNS.
+    pub fn set_max_duration_hns(&mut self, max_duration_hns: i64) {
+        self.max_duration_hns = max_duration_hns;
+        self.prune();
+    }
+
     /// Clears the ring buffer.
     pub fn clear(&mut self) {
         self.video_chunks.clear();

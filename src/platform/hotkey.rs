@@ -7,20 +7,30 @@ use log::{info, warn};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT, VK_F9,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW,
     TranslateMessage, MSG, WM_HOTKEY, WM_QUIT,
 };
 
-/// Hotkey identification ID.
-const OMNICLIP_HOTKEY_ID: i32 = 0x4F43; // 'OC'
+/// Hotkey identification IDs.
+const OMNICLIP_HOTKEY_REPLAY_ID: i32 = 0x4F43; // 'OC' (Alt+F10)
+const OMNICLIP_HOTKEY_OVERLAY_ID: i32 = 0x4F5A; // 'OZ' (Alt+Z)
+const OMNICLIP_HOTKEY_RECORD_ID: i32 = 0x4F52;  // 'OR' (Alt+F9)
 
-/// Event emitted when the replay hotkey is triggered.
+/// Virtual key code for ASCII 'Z'.
+const VK_KEY_Z: u32 = 0x5A;
+
+/// Event emitted when a global hotkey is triggered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HotkeyEvent {
+    /// Trigger circular buffer replay dump to disk (Alt+F10).
     TriggerReplay,
+    /// Toggle visibility of Material 3 control overlay (Alt+Z).
+    ToggleOverlay,
+    /// Toggle continuous manual recording mode (Alt+F9).
+    ToggleRecord,
 }
 
 /// Global hotkey listener running a Win32 message loop on a dedicated thread.
@@ -33,8 +43,8 @@ pub struct HotkeyListener {
 impl HotkeyListener {
     /// Spawns the hotkey listener thread.
     ///
-    /// * `modifiers`: Bitflag modifiers (e.g. MOD_ALT | MOD_NOREPEAT)
-    /// * `vk_code`: Virtual-key code (e.g. 0x79 for VK_F10)
+    /// * `modifiers`: Bitflag modifiers for replay trigger (e.g. MOD_ALT | MOD_NOREPEAT)
+    /// * `vk_code`: Virtual-key code for replay trigger (e.g. 0x79 for VK_F10)
     /// * `sender`: Channel sender to notify when hotkey is pressed
     pub fn spawn(
         modifiers: HOT_KEY_MODIFIERS,
@@ -54,23 +64,46 @@ impl HotkeyListener {
                 let tid = unsafe { GetCurrentThreadId() };
                 thread_id_clone.store(tid, Ordering::SeqCst);
 
-                // Register global hotkey for this thread
-                let reg_res = unsafe {
+                // Register global hotkey for replay buffer (Alt+F10 default)
+                let reg_replay = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
-                        OMNICLIP_HOTKEY_ID,
+                        OMNICLIP_HOTKEY_REPLAY_ID,
                         modifiers | MOD_NOREPEAT,
                         vk_code,
                     )
                 };
 
-                if let Err(e) = reg_res {
-                    let _ = init_tx.send(Err(anyhow!("Failed to register hotkey: {}", e)));
+                if let Err(e) = reg_replay {
+                    let _ = init_tx.send(Err(anyhow!("Failed to register replay hotkey: {}", e)));
                     return;
                 }
 
+                // Register global hotkey for overlay toggle (Alt+Z)
+                let _ = unsafe {
+                    RegisterHotKey(
+                        HWND(std::ptr::null_mut()),
+                        OMNICLIP_HOTKEY_OVERLAY_ID,
+                        MOD_ALT | MOD_NOREPEAT,
+                        VK_KEY_Z,
+                    )
+                };
+
+                // Register global hotkey for manual record toggle (Alt+F9)
+                let _ = unsafe {
+                    RegisterHotKey(
+                        HWND(std::ptr::null_mut()),
+                        OMNICLIP_HOTKEY_RECORD_ID,
+                        MOD_ALT | MOD_NOREPEAT,
+                        VK_F9.0 as u32,
+                    )
+                };
+
                 let _ = init_tx.send(Ok(()));
-                info!("Registered global hotkey (ID: 0x{:X})", OMNICLIP_HOTKEY_ID);
+                info!(
+                    "Registered global hotkeys: Replay (0x{:X}), Overlay (0x{:X}), Record (0x{:X})",
+                    OMNICLIP_HOTKEY_REPLAY_ID, OMNICLIP_HOTKEY_OVERLAY_ID, OMNICLIP_HOTKEY_RECORD_ID
+                );
 
                 let mut msg = MSG::default();
                 while running_clone.load(Ordering::SeqCst) {
@@ -79,10 +112,20 @@ impl HotkeyListener {
                         break;
                     }
 
-                    if msg.message == WM_HOTKEY && msg.wParam.0 as i32 == OMNICLIP_HOTKEY_ID {
-                        info!("Global hotkey pressed! Sending trigger event...");
-                        if let Err(e) = sender.send(HotkeyEvent::TriggerReplay) {
-                            warn!("Failed to dispatch hotkey event: {}", e);
+                    if msg.message == WM_HOTKEY {
+                        let hotkey_id = msg.wParam.0 as i32;
+                        let event = match hotkey_id {
+                            OMNICLIP_HOTKEY_REPLAY_ID => Some(HotkeyEvent::TriggerReplay),
+                            OMNICLIP_HOTKEY_OVERLAY_ID => Some(HotkeyEvent::ToggleOverlay),
+                            OMNICLIP_HOTKEY_RECORD_ID => Some(HotkeyEvent::ToggleRecord),
+                            _ => None,
+                        };
+
+                        if let Some(ev) = event {
+                            info!("Global hotkey pressed: {:?} (ID: 0x{:X})", ev, hotkey_id);
+                            if let Err(e) = sender.send(ev) {
+                                warn!("Failed to dispatch hotkey event: {}", e);
+                            }
                         }
                     }
 
@@ -92,11 +135,13 @@ impl HotkeyListener {
                     }
                 }
 
-                // Cleanup hotkey registration
+                // Cleanup hotkey registrations
                 unsafe {
-                    let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_ID);
+                    let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_REPLAY_ID);
+                    let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_OVERLAY_ID);
+                    let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_RECORD_ID);
                 }
-                info!("Unregistered global hotkey");
+                info!("Unregistered all global hotkeys");
             })
             .map_err(|e| anyhow!("Failed to spawn hotkey thread: {}", e))?;
 

@@ -5,3 +5,4 @@ pub mod config;
 pub mod encoder;
 pub mod muxer;
 pub mod platform;
+pub mod ui;
