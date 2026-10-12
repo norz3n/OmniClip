@@ -1,8 +1,8 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::thread;
 use anyhow::Result;
 use log::info;
+use windows::Win32::Foundation::BOOL;
 
 use omni_clip::audio::WasapiLoopbackCapture;
 use omni_clip::buffer::{create_shared_ring_buffer, RingBufferSnapshot};
@@ -13,7 +13,29 @@ use omni_clip::muxer::Mp4Muxer;
 use omni_clip::platform::hotkey::{HotkeyEvent, HotkeyListener};
 use omni_clip::platform::time::QpcTimer;
 
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
+/// Win32 console control event handler for clean shutdown on Ctrl+C / close.
+unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
+    match ctrl_type {
+        windows::Win32::System::Console::CTRL_C_EVENT
+        | windows::Win32::System::Console::CTRL_BREAK_EVENT
+        | windows::Win32::System::Console::CTRL_CLOSE_EVENT => {
+            log::info!("Termination signal received, exiting gracefully...");
+            RUNNING.store(false, Ordering::SeqCst);
+            BOOL(1)
+        }
+        _ => BOOL(0),
+    }
+}
+
 fn main() -> Result<()> {
+    unsafe {
+        let _ = windows::Win32::System::Console::SetConsoleCtrlHandler(
+            Some(console_ctrl_handler),
+            BOOL(1),
+        );
+    }
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     info!("=======================================================");
     info!("  OmniClip — Ultra-Lightweight Instant Replay System   ");
@@ -62,6 +84,8 @@ fn main() -> Result<()> {
     let mut audio_capture = WasapiLoopbackCapture::spawn(
         timer.clone(),
         config.audio_bitrate,
+        config.mic_enabled,
+        config.mic_volume,
         audio_tx,
     )?;
 
@@ -101,11 +125,9 @@ fn main() -> Result<()> {
     let frame_duration_hns = config.frame_duration_hns();
     let mut captured_frames = 0u64;
     let mut encoded_chunks = 0u64;
-    let running = Arc::new(AtomicBool::new(true));
-
     info!("Streaming screen and audio into zero-copy circular buffer (Ctrl+C to quit)...");
 
-    while running.load(Ordering::SeqCst) {
+    while RUNNING.load(Ordering::SeqCst) {
         // Drain incoming audio packets into ring buffer
         while let Ok(audio_chunk) = audio_rx.try_recv() {
             ring_buffer.lock().push_audio(audio_chunk);

@@ -18,6 +18,10 @@ pub struct Config {
     pub audio_sample_rate: u32,
     /// Audio channel count (2 for Stereo).
     pub audio_channels: u32,
+    /// Whether microphone capture is enabled (defaults to true).
+    pub mic_enabled: bool,
+    /// Microphone volume multiplier (1.0 = 100%).
+    pub mic_volume: f32,
     /// Directory where MP4 replay files are saved.
     pub output_dir: PathBuf,
     /// Hotkey modifier keys (e.g. Alt).
@@ -41,6 +45,8 @@ impl Default for Config {
             audio_bitrate: 192_000,
             audio_sample_rate: 48_000,
             audio_channels: 2,
+            mic_enabled: true,
+            mic_volume: 1.0,
             output_dir,
             hotkey_modifiers: MOD_ALT,
             hotkey_vk: VK_F10.0 as u32,

@@ -228,3 +228,28 @@ impl AacEncoder {
         self.bitrate
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::encoder::mf_runtime::MfPlatformGuard;
+
+    #[test]
+    fn test_aac_encoder_lifecycle() {
+        let _guard = MfPlatformGuard::init().unwrap();
+        let mut encoder = AacEncoder::new(48000, 2, 192_000).unwrap();
+        assert_eq!(encoder.sample_rate(), 48000);
+        assert_eq!(encoder.channels(), 2);
+
+        // Feed 100ms of PCM16 silence (4800 samples * 2 channels * 2 bytes = 19200 bytes)
+        let pcm_silence = vec![0u8; 19200];
+        let chunks = encoder.encode_pcm(&pcm_silence, 0, 1_000_000).unwrap();
+        // AAC transform generates frames for 100ms input
+        assert!(!chunks.is_empty(), "AAC encoder must generate chunks for 100ms PCM input");
+        for chunk in chunks {
+            assert!(!chunk.data.is_empty());
+            assert!(chunk.duration_hns > 0);
+        }
+    }
+}
+
