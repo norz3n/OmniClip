@@ -187,17 +187,27 @@ pub fn set_overlay_visible(visible: bool) {
 }
 
 /// Launches the native modern Windows folder picker dialog and returns the selected path.
-/// Properly parents the dialog to the overlay window so it appears in front of the topmost UI.
+/// Properly parents the dialog to the overlay window so it appears in front of the topmost UI without cross-thread deadlocks.
 pub fn pick_folder(title: Option<&str>) -> Option<std::path::PathBuf> {
-    let title_owned = title.map(|s| s.to_string());
-    let parent_hwnd = get_overlay_hwnd();
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::System::Com::{
+            CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
+            COINIT_APARTMENTTHREADED,
+        };
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::Shell::{
+            FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowThreadProcessId, SetForegroundWindow, SetWindowPos, HWND_NOTOPMOST, HWND_TOPMOST,
+            SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
+        };
 
-    // Temporarily demote overlay from HWND_TOPMOST so the modal dialog is guaranteed to sit on top
-    if !parent_hwnd.0.is_null() {
-        unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::{
-                SetWindowPos, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
-            };
+        let parent_hwnd = get_overlay_hwnd();
+
+        // 1. Temporarily demote overlay from HWND_TOPMOST so the modal dialog is guaranteed to sit on top
+        if !parent_hwnd.0.is_null() {
             let _ = SetWindowPos(
                 parent_hwnd,
                 HWND_NOTOPMOST,
@@ -208,72 +218,61 @@ pub fn pick_folder(title: Option<&str>) -> Option<std::path::PathBuf> {
                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
-    }
-    let parent_hwnd_raw = parent_hwnd.0 as isize;
 
-    let result = std::thread::spawn(move || {
-        unsafe {
-            use windows::Win32::Foundation::HWND;
-            use windows::Win32::System::Com::{
-                CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
-                COINIT_APARTMENTTHREADED,
-            };
-            use windows::Win32::UI::Shell::{
-                FileOpenDialog, IFileOpenDialog, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, SIGDN_FILESYSPATH,
-            };
+        // Initialize COM as STA if not already initialized on this thread
+        let com_hr = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let should_uninit = com_hr.is_ok();
 
-            let com_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
-            let parent_hwnd = HWND(parent_hwnd_raw as *mut _);
+        let current_tid = GetCurrentThreadId();
+        let owner_tid = if !parent_hwnd.0.is_null() {
+            GetWindowThreadProcessId(parent_hwnd, None)
+        } else {
+            0
+        };
 
-            let res = (|| -> Option<std::path::PathBuf> {
-                let dialog: IFileOpenDialog =
-                    CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
-                dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
-                let title_str = title_owned.as_deref().unwrap_or("OmniClip — Select Storage Folder");
-                let title_u16: Vec<u16> = title_str.encode_utf16().chain(std::iter::once(0)).collect();
-                dialog
-                    .SetTitle(windows::core::PCWSTR(title_u16.as_ptr()))
-                    .ok()?;
-                let owner = if !parent_hwnd.0.is_null() {
-                    parent_hwnd
-                } else {
-                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
-                };
-                if !owner.0.is_null() {
-                    dialog.Show(owner).ok()?;
-                } else {
-                    dialog.Show(None).ok()?;
-                }
-                let item = dialog.GetResult().ok()?;
-                let display_name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-                let path_str = display_name.to_string().ok()?;
-                CoTaskMemFree(Some(display_name.0 as *const _));
-                Some(std::path::PathBuf::from(path_str))
-            })();
+        // Only pass parent_hwnd as modal owner if called on the exact thread that owns parent_hwnd
+        // to prevent Win32 cross-thread SendMessage deadlocks during EnableWindow(FALSE).
+        let owner = if owner_tid == current_tid && !parent_hwnd.0.is_null() {
+            parent_hwnd
+        } else {
+            HWND(std::ptr::null_mut())
+        };
 
-            if com_init {
-                CoUninitialize();
+        let result = (|| -> Option<std::path::PathBuf> {
+            let dialog: IFileOpenDialog =
+                CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
+            dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+            let title_str = title.unwrap_or("OmniClip — Select Storage Folder");
+            let title_u16: Vec<u16> = title_str.encode_utf16().chain(std::iter::once(0)).collect();
+            dialog
+                .SetTitle(windows::core::PCWSTR(title_u16.as_ptr()))
+                .ok()?;
+
+            if !owner.0.is_null() {
+                dialog.Show(owner).ok()?;
+            } else {
+                dialog.Show(None).ok()?;
             }
 
-            res
-        }
-    })
-    .join()
-    .ok()
-    .flatten();
+            let item = dialog.GetResult().ok()?;
+            let display_name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            let path_str = display_name.to_string().ok()?;
+            CoTaskMemFree(Some(display_name.0 as *const _));
+            Some(std::path::PathBuf::from(path_str))
+        })();
 
-    // Re-promote overlay window back to HWND_TOPMOST and restore focus
-    if !parent_hwnd.0.is_null() && is_overlay_visible() {
-        unsafe {
-            use windows::Win32::UI::WindowsAndMessaging::{
-                SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
-            };
+        if should_uninit {
+            CoUninitialize();
+        }
+
+        // 2. Re-promote overlay window back to HWND_TOPMOST and restore focus
+        if !parent_hwnd.0.is_null() && is_overlay_visible() {
             let _ = SetWindowPos(parent_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
             let _ = SetForegroundWindow(parent_hwnd);
         }
-    }
 
-    result
+        result
+    }
 }
 
 /// Toggles the overlay window visibility and returns the new visibility state.
