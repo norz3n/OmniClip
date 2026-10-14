@@ -194,9 +194,21 @@ unsafe extern "system" fn tray_wnd_proc(
                                     action_to_send = Some(UiAction::SaveReplay);
                                 }
                                 TRAY_CMD_EXIT => {
+                                    log::info!("Tray context menu: Exit requested. Initiating full application shutdown...");
                                     ctx_guard.running.store(false, Ordering::SeqCst);
+                                    if let Some(ctx) = ctx_guard.egui_ctx.lock().as_ref() {
+                                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                                        ctx.request_repaint();
+                                    }
                                     crate::ui::close_overlay_window();
                                     action_to_send = Some(UiAction::QuitApplication);
+
+                                    // Watchdog fallback: ensure process terminates cleanly within 2 seconds
+                                    std::thread::spawn(|| {
+                                        std::thread::sleep(std::time::Duration::from_millis(2000));
+                                        log::info!("Shutdown watchdog: forcing process exit...");
+                                        std::process::exit(0);
+                                    });
                                 }
                                 _ => {}
                             }

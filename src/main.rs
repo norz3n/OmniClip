@@ -488,6 +488,10 @@ fn main() -> Result<()> {
                             }
                             UiAction::QuitApplication => {
                                 running_capture.store(false, Ordering::SeqCst);
+                                if let Some(ctx) = egui_ctx_capture.lock().as_ref() {
+                                    ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Close);
+                                    ctx.request_repaint();
+                                }
                                 omni_clip::ui::close_overlay_window();
                             }
                         }
@@ -656,5 +660,5 @@ fn main() -> Result<()> {
     let _ = writer_handle.join();
 
     info!("OmniClip shutdown complete.");
-    Ok(())
+    std::process::exit(0);
 }

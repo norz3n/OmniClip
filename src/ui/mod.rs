@@ -14,6 +14,17 @@ pub use tray::{TrayIcon, TrayManager};
 
 static OVERLAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static OVERLAY_IS_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static MAIN_THREAD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Sets the recorded main Win32 UI thread ID.
+pub fn set_main_thread_id(tid: u32) {
+    MAIN_THREAD_ID.store(tid, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Retrieves the recorded main Win32 UI thread ID.
+pub fn get_main_thread_id() -> u32 {
+    MAIN_THREAD_ID.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 /// Returns whether the overlay is currently marked as visible.
 pub fn is_overlay_visible() -> bool {
@@ -32,6 +43,7 @@ pub fn init_overlay_window() {
         use windows::core::w;
 
         let thread_id = GetCurrentThreadId();
+        set_main_thread_id(thread_id);
         let mut found_hwnd = HWND(std::ptr::null_mut());
 
         unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -283,17 +295,23 @@ pub fn toggle_overlay_visible() -> bool {
     new_state
 }
 
-/// Sends WM_CLOSE to the overlay window handle to trigger clean shutdown of the window event loop.
+/// Sends WM_CLOSE and WM_QUIT to trigger clean shutdown of the window event loop.
 pub fn close_overlay_window() {
     HUD_STOP_SIGNAL.store(true, std::sync::atomic::Ordering::SeqCst);
     unsafe {
         use windows::Win32::Foundation::{LPARAM, WPARAM};
-        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, PostThreadMessageW, WM_CLOSE, WM_QUIT};
 
         let hwnd = get_overlay_hwnd();
         if !hwnd.0.is_null() {
             let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
             log::info!("Dispatched WM_CLOSE to overlay HWND {:?}", hwnd.0);
+        }
+
+        let main_tid = get_main_thread_id();
+        if main_tid != 0 {
+            let _ = PostThreadMessageW(main_tid, WM_QUIT, WPARAM(0), LPARAM(0));
+            log::info!("Dispatched WM_QUIT to main thread ID {}", main_tid);
         }
     }
 }
