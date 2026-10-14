@@ -56,6 +56,8 @@ pub struct OmniClipApp {
     path_edit_buffer: String,
     /// Cached egui textures for application executable icons (keyed by exe path or name).
     app_icon_textures: Mutex<HashMap<String, Option<egui::TextureHandle>>>,
+    /// Cached egui texture for OmniClip branded logo.
+    logo_texture: Mutex<Option<egui::TextureHandle>>,
 }
 
 impl OmniClipApp {
@@ -202,6 +204,7 @@ impl OmniClipApp {
             fonts_initialized: false,
             path_edit_buffer: initial_path,
             app_icon_textures: Mutex::new(HashMap::new()),
+            logo_texture: Mutex::new(None),
         }
     }
 }
@@ -324,6 +327,17 @@ impl OmniClipApp {
     /// Renders the top header bar with branding, live status chips, and close button.
     fn render_header(&self, ui: &mut egui::Ui, ctx: &egui::Context, state: &UiState) {
         ui.horizontal(|ui| {
+            // Branded OmniClip logo icon
+            if let Ok(mut logo_lock) = self.logo_texture.lock() {
+                let logo_tex = logo_lock.get_or_insert_with(|| {
+                    static ICON_128_RGBA: &[u8] = include_bytes!("../../assets/logo_128.rgba");
+                    let color_img = egui::ColorImage::from_rgba_unmultiplied([128, 128], ICON_128_RGBA);
+                    ctx.load_texture("omniclip_logo", color_img, egui::TextureOptions::LINEAR)
+                });
+                ui.image((logo_tex.id(), egui::vec2(24.0, 24.0)));
+                ui.add_space(2.0);
+            }
+
             ui.heading(
                 RichText::new("OmniClip")
                     .color(M3Theme::EGUI_PRIMARY)

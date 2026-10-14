@@ -12,6 +12,16 @@ pub use state::{
 pub use theme::{M3Icon, M3Theme};
 pub use tray::{TrayIcon, TrayManager};
 
+/// Returns the bundled OmniClip logo as `egui::IconData` for window decoration and taskbar.
+pub fn app_icon() -> egui::IconData {
+    static ICON_128_RGBA: &[u8] = include_bytes!("../../assets/logo_128.rgba");
+    egui::IconData {
+        rgba: ICON_128_RGBA.to_vec(),
+        width: 128,
+        height: 128,
+    }
+}
+
 static OVERLAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static OVERLAY_IS_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static MAIN_THREAD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

@@ -43,3 +43,6 @@ egui = "0.31"
 eframe = { version = "0.31", default-features = false, features = ["default_fonts", "glow"] }
 serde = { version = "1.0", features = ["derive"] }
 toml = "0.8"
+
+[build-dependencies]
+winres = "0.1"

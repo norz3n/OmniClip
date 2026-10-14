@@ -600,7 +600,8 @@ fn main() -> Result<()> {
             .with_visible(false)
             .with_drag_and_drop(false)
             .with_inner_size([win_w, win_h])
-            .with_position([pos_x, pos_y]),
+            .with_position([pos_x, pos_y])
+            .with_icon(omni_clip::ui::app_icon()),
         ..Default::default()
     };
 

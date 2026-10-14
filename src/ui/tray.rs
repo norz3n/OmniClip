@@ -10,11 +10,12 @@ use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
-    GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage, PostThreadMessageW, RegisterClassExW,
-    SetForegroundWindow, TrackPopupMenu, HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, MSG,
-    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDBLCLK,
-    WM_LBUTTONUP, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_OVERLAPPED,
+    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+    DestroyIcon, DestroyMenu, DispatchMessageW, GetCursorPos, GetMessageW, LoadIconW,
+    PostQuitMessage, PostThreadMessageW, RegisterClassExW, SetForegroundWindow, TrackPopupMenu,
+    HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, MSG, TPM_NONOTIFY, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_QUIT,
+    WM_RBUTTONUP, WNDCLASSEXW, WS_OVERLAPPED,
 };
 
 use crate::ui::app::UiAction;
@@ -35,6 +36,7 @@ const TRAY_ICON_UID: u32 = 101;
 /// System tray notification icon manager using native Windows Shell API.
 pub struct TrayIcon {
     hwnd: HWND,
+    hicon: HICON,
     added: bool,
 }
 
@@ -53,10 +55,20 @@ impl TrayIcon {
             ..Default::default()
         };
 
-        // Load standard default application icon
-        unsafe {
-            nid.hIcon = LoadIconW(None, IDI_APPLICATION).unwrap_or(HICON(std::ptr::null_mut()));
-        }
+        // Load custom OmniClip branded tray icon or fallback to default
+        static TRAY_ICON_PNG: &[u8] = include_bytes!("../../assets/logo_32.png");
+        let hicon = unsafe {
+            CreateIconFromResourceEx(
+                TRAY_ICON_PNG,
+                true,
+                0x00030000,
+                32,
+                32,
+                Default::default(),
+            )
+            .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or(HICON(std::ptr::null_mut())))
+        };
+        nid.hIcon = hicon;
 
         // Copy tooltip text into UTF-16 buffer
         let tip_utf16: Vec<u16> = tip_text.encode_utf16().chain(std::iter::once(0)).collect();
@@ -69,7 +81,7 @@ impl TrayIcon {
         }
 
         info!("Registered system tray icon for OmniClip");
-        Ok(Self { hwnd, added: true })
+        Ok(Self { hwnd, hicon, added: true })
     }
 
     /// Displays the right-click context menu and returns the selected command ID.
@@ -116,7 +128,7 @@ impl TrayIcon {
         }
     }
 
-    /// Removes the tray icon from the notification area.
+    /// Removes the tray icon from the notification area and frees icon handle.
     pub fn remove(&mut self) {
         if self.added {
             let nid = NOTIFYICONDATAW {
@@ -129,6 +141,12 @@ impl TrayIcon {
                 let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
             }
             self.added = false;
+        }
+        if !self.hicon.0.is_null() {
+            unsafe {
+                let _ = DestroyIcon(self.hicon);
+            }
+            self.hicon = HICON(std::ptr::null_mut());
         }
     }
 }
