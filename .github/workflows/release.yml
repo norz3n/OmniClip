@@ -1,0 +1,112 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Cargo.toml'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build & Publish Release
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect Cargo package version
+        shell: pwsh
+        run: |
+          $content = Get-Content Cargo.toml -Raw
+          if ($content -match '(?m)^version\s*=\s*"([^"]+)"') {
+              $ver = $matches[1]
+              Write-Host "Detected package version: $ver"
+              "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+              "TAG_NAME=v$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+              Write-Error "Could not parse version from Cargo.toml"
+              exit 1
+          }
+
+      - name: Check if release tag already exists
+        shell: pwsh
+        run: |
+          $tag = $env:TAG_NAME
+          $tagExists = git tag -l $tag
+          if ($tagExists) {
+              Write-Host "Tag $tag already exists in repository. Skipping release workflow."
+              "SHOULD_RELEASE=false" | Out-File -FilePath $env:GITHUB_ENV -Append
+          } else {
+              Write-Host "New version detected ($tag). Proceeding to build and publish."
+              "SHOULD_RELEASE=true" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+
+      - name: Install Rust toolchain
+        if: env.SHOULD_RELEASE == 'true'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        if: env.SHOULD_RELEASE == 'true'
+        uses: swatinem/rust-cache@v2
+
+      - name: Run automated test suite
+        if: env.SHOULD_RELEASE == 'true'
+        run: cargo test --verbose
+
+      - name: Build release binary
+        if: env.SHOULD_RELEASE == 'true'
+        run: cargo build --release --locked
+
+      - name: Install Inno Setup compiler
+        if: env.SHOULD_RELEASE == 'true'
+        shell: pwsh
+        run: |
+          choco install innosetup --no-progress -y
+          "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Compile Inno Setup installer
+        if: env.SHOULD_RELEASE == 'true'
+        shell: pwsh
+        run: |
+          $ver = $env:APP_VERSION
+          iscc /DMyAppVersion=$ver installer/omniclip_setup.iss
+
+      - name: Prepare portable archive and checksums
+        if: env.SHOULD_RELEASE == 'true'
+        shell: pwsh
+        run: |
+          $ver = $env:APP_VERSION
+          $portableZip = "dist/OmniClip_v$($ver)_Portable.zip"
+          Compress-Archive -Path target/release/omni_clip.exe, assets/logo.ico, README.md -DestinationPath $portableZip
+          
+          Get-FileHash -Algorithm SHA256 (Get-ChildItem dist/*.*) | ForEach-Object {
+              "$($_.Hash)  $($_.Path | Split-Path -Leaf)"
+          } | Out-File -Encoding utf8 dist/SHA256SUMS.txt
+          
+          Write-Host "Generated release artifacts in dist/:"
+          Get-ChildItem dist/
+
+      - name: Publish GitHub Release
+        if: env.SHOULD_RELEASE == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tag = $env:TAG_NAME
+          $ver = $env:APP_VERSION
+          
+          gh release create $tag `
+            --title "OmniClip $tag" `
+            --generate-notes `
+            "dist/OmniClip_Setup_$($ver).exe" `
+            "dist/OmniClip_v$($ver)_Portable.zip" `
+            "dist/SHA256SUMS.txt"
