@@ -80,6 +80,23 @@ pub struct SavedReplayEntry {
     pub size_mb: f64,
 }
 
+/// Active audio application detected by real-time WASAPI monitor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioAppEntry {
+    /// Process executable name (e.g. "Discord.exe").
+    pub name: String,
+    /// Absolute filesystem path to the executable file.
+    pub exe_path: String,
+    /// Operating system process ID.
+    pub pid: u32,
+    /// Real-time peak volume level (0.0 ..= 1.0).
+    pub peak: f32,
+    /// Whether actively emitting audio.
+    pub is_playing: bool,
+    /// Timestamp when audio output was last detected.
+    pub last_active: Instant,
+}
+
 /// Global UI and interactive runtime state for OmniClip.
 #[derive(Debug, Clone)]
 pub struct UiState {
@@ -153,10 +170,11 @@ pub struct UiState {
     pub available_playback_devices: Vec<(String, String)>,
     /// Enumerated audio capture/microphone devices: (device_id, friendly_name).
     pub available_capture_devices: Vec<(String, String)>,
+
     /// Application audio capture mode: "all" (All system), "include" (Selected only), "exclude" (Exclude selected).
     pub audio_app_filter_mode: String,
-    /// List of detected active audio application executable names (e.g. "Discord.exe").
-    pub detected_audio_apps: Vec<String>,
+    /// List of detected active audio applications currently emitting sound.
+    pub detected_audio_apps: Vec<AudioAppEntry>,
     /// Set of application executable names selected for include/exclude filter.
     pub selected_audio_apps: Vec<String>,
 

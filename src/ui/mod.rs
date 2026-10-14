@@ -5,7 +5,7 @@ pub mod tray;
 
 pub use app::{OmniClipApp, UiAction};
 pub use state::{
-    create_shared_ui_state, HubTab, SavedReplayEntry, SharedUiState, ToastNotification, UiState,
+    create_shared_ui_state, AudioAppEntry, HubTab, SavedReplayEntry, SharedUiState, ToastNotification, UiState,
 };
 pub use theme::{M3Icon, M3Theme};
 pub use tray::TrayIcon;

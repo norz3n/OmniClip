@@ -281,6 +281,16 @@ impl M3Icon {
     pub const OPEN_EXTERNAL: &'static str = "\u{E8DA}";
     /// Refresh icon (U+E72C).
     pub const REFRESH: &'static str = "\u{E72C}";
+    /// Equalizer / Audio format & tracks tuning icon (U+E9E9).
+    pub const EQUALIZER: &'static str = "\u{E9E9}";
+    /// Sliders / Mixer tuning icon (U+E71D).
+    pub const SLIDERS: &'static str = "\u{E71D}";
+    /// Pause icon (U+E769).
+    pub const PAUSE: &'static str = "\u{E769}";
+    /// Mute audio icon (U+E74F).
+    pub const MUTE: &'static str = "\u{E74F}";
+    /// Settings gear icon (U+E713).
+    pub const SETTINGS: &'static str = "\u{E713}";
 }
 
 #[cfg(test)]
@@ -301,6 +311,7 @@ mod tests {
         let ctx = egui::Context::default();
         M3Theme::setup_fonts(&ctx);
         M3Theme::apply_m3_style(&ctx);
+        let _ = ctx.run(Default::default(), |_| {});
 
         // Test glyph constants
         assert_eq!(M3Icon::CLOSE, "\u{E8BB}");
@@ -311,5 +322,10 @@ mod tests {
         assert_eq!(M3Icon::MIC, "\u{E720}");
         assert_eq!(M3Icon::KEYBOARD, "\u{E765}");
         assert_eq!(M3Icon::FOLDER, "\u{E8B7}");
+        assert_eq!(M3Icon::EQUALIZER, "\u{E9E9}");
+        assert_eq!(M3Icon::SLIDERS, "\u{E71D}");
+        assert_eq!(M3Icon::PAUSE, "\u{E769}");
+        assert_eq!(M3Icon::MUTE, "\u{E74F}");
+        assert_eq!(M3Icon::SETTINGS, "\u{E713}");
     }
 }

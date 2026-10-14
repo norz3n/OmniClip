@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 use crossbeam_channel::{Receiver, Sender};
 use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Stroke, Vec2};
@@ -47,6 +49,8 @@ pub struct OmniClipApp {
     fonts_initialized: bool,
     /// Editable text buffer for storage directory path.
     path_edit_buffer: String,
+    /// Cached egui textures for application executable icons (keyed by exe path or name).
+    app_icon_textures: Mutex<HashMap<String, Option<egui::TextureHandle>>>,
 }
 
 impl OmniClipApp {
@@ -70,9 +74,118 @@ impl OmniClipApp {
                 st.available_capture_devices = crate::audio::enumerate_audio_devices(true);
             }
             if st.detected_audio_apps.is_empty() {
-                st.detected_audio_apps = crate::audio::enumerate_audio_sessions();
+                let now = std::time::Instant::now();
+                st.detected_audio_apps = crate::audio::scan_active_audio_sessions()
+                    .into_iter()
+                    .map(|a| crate::ui::state::AudioAppEntry {
+                        name: a.name,
+                        exe_path: a.exe_path,
+                        pid: a.pid,
+                        peak: a.peak,
+                        is_playing: a.is_playing,
+                        last_active: now,
+                    })
+                    .collect();
             }
         }
+
+        // Spawn real-time audio session monitor worker thread
+        let monitor_state = state.clone();
+        let monitor_running = running.clone();
+        let _ = std::thread::Builder::new()
+            .name("omniclip-audio-monitor".to_string())
+            .spawn(move || {
+                unsafe {
+                    let _ = windows::Win32::System::Com::CoInitializeEx(
+                        None,
+                        windows::Win32::System::Com::COINIT_MULTITHREADED,
+                    );
+                }
+
+                while monitor_running.load(std::sync::atomic::Ordering::Relaxed) {
+                    if crate::ui::is_overlay_visible() {
+                        let scanned_apps = crate::audio::scan_active_audio_sessions();
+                        let now = std::time::Instant::now();
+
+                        let mut st = monitor_state.write();
+                        let selected = st.selected_audio_apps.clone();
+
+                        // 1. Ingest or update scanned applications emitting audio
+                        for scanned in scanned_apps {
+                            if let Some(existing) = st
+                                .detected_audio_apps
+                                .iter_mut()
+                                .find(|a| a.name.eq_ignore_ascii_case(&scanned.name))
+                            {
+                                existing.pid = scanned.pid;
+                                existing.peak = scanned.peak;
+                                existing.is_playing = scanned.is_playing;
+                                if existing.exe_path.is_empty() && !scanned.exe_path.is_empty() {
+                                    existing.exe_path = scanned.exe_path.clone();
+                                }
+                                if scanned.is_playing || scanned.peak > 0.001 {
+                                    existing.last_active = now;
+                                }
+                            } else {
+                                st.detected_audio_apps.push(crate::ui::state::AudioAppEntry {
+                                    name: scanned.name,
+                                    exe_path: scanned.exe_path,
+                                    pid: scanned.pid,
+                                    peak: scanned.peak,
+                                    is_playing: scanned.is_playing,
+                                    last_active: now,
+                                });
+                            }
+                        }
+
+                        // 2. Decay peaks and remove unselected applications silent for > 3.5 seconds
+                        st.detected_audio_apps.retain_mut(|entry| {
+                            let is_sel = selected.iter().any(|s| s.eq_ignore_ascii_case(&entry.name));
+                            let silent_duration = now.duration_since(entry.last_active);
+
+                            if silent_duration > std::time::Duration::from_millis(3500) {
+                                entry.peak = 0.0;
+                                entry.is_playing = false;
+                                is_sel
+                            } else {
+                                entry.peak *= 0.85;
+                                if entry.peak < 0.001 {
+                                    entry.peak = 0.0;
+                                }
+                                true
+                            }
+                        });
+
+                        // 3. Ensure any user-selected app is present in the list (even if silent)
+                        for sel in &selected {
+                            if !st
+                                .detected_audio_apps
+                                .iter()
+                                .any(|a| a.name.eq_ignore_ascii_case(sel))
+                            {
+                                st.detected_audio_apps.push(crate::ui::state::AudioAppEntry {
+                                    name: sel.clone(),
+                                    exe_path: String::new(),
+                                    pid: 0,
+                                    peak: 0.0,
+                                    is_playing: false,
+                                    last_active: now - std::time::Duration::from_secs(10),
+                                });
+                            }
+                        }
+
+                        drop(st);
+                        std::thread::sleep(std::time::Duration::from_millis(150));
+                    } else {
+                        // Overlay is not visible, idle to conserve CPU
+                        std::thread::sleep(std::time::Duration::from_millis(600));
+                    }
+                }
+
+                unsafe {
+                    windows::Win32::System::Com::CoUninitialize();
+                }
+            });
 
         Self {
             state,
@@ -83,6 +196,7 @@ impl OmniClipApp {
             running,
             fonts_initialized: false,
             path_edit_buffer: initial_path,
+            app_icon_textures: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -122,6 +236,9 @@ impl eframe::App for OmniClipApp {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
             return;
         }
+
+        // Request periodic repaint when overlay is visible for smooth VU meters and real-time scanner animations
+        ctx.request_repaint_after(std::time::Duration::from_millis(80));
 
         // 3. Handle Escape key to dismiss Hub
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -868,7 +985,7 @@ impl OmniClipApp {
         // Section 1: Resolution & Framerate
         self.render_section_card(
             ui,
-            "🖥 Разрешение и частота кадров",
+            &format!("{}  Разрешение и частота кадров", M3Icon::VIDEO),
             Some("Параметры масштабирования холста DXGI Desktop Duplication и целевой FPS"),
             |ui| {
                 self.render_row(ui, |ui| {
@@ -923,7 +1040,7 @@ impl OmniClipApp {
         // Section 2: Rate Control & Bitrate
         self.render_section_card(
             ui,
-            "⚙ Управление битрейтом и качество (Rate Control)",
+            &format!("{}  Управление битрейтом и качество (Rate Control)", M3Icon::SLIDERS),
             Some("Метод распределения битрейта H.264 энкодера Media Foundation"),
             |ui| {
                 self.render_row(ui, |ui| {
@@ -980,7 +1097,7 @@ impl OmniClipApp {
         // Section 3: Hardware Encoder Tuning
         self.render_section_card(
             ui,
-            "🚀 Аппаратный энкодер и профили H.264",
+            &format!("{}  Аппаратный энкодер и профили H.264", M3Icon::LIGHTNING),
             Some("Аппаратное кодирование NVENC / Intel QuickSync / AMD AMF с минимальным оверхедом"),
             |ui| {
                 self.render_row(ui, |ui| {
@@ -1050,7 +1167,7 @@ impl OmniClipApp {
     fn render_tab_buffer(&self, ui: &mut egui::Ui, state: &UiState) {
         self.render_section_card(
             ui,
-            "⏱ Глубина мгновенного повтора и лимиты памяти",
+            &format!("{}  Глубина мгновенного повтора и лимиты памяти", M3Icon::STOPWATCH),
             Some("Настройка кольцевого буфера FIFO в ОЗУ с автовытеснением устаревших кадров"),
             |ui| {
                 let mut duration_val = state.buffer_duration_secs;
@@ -1106,7 +1223,7 @@ impl OmniClipApp {
 
         self.render_section_card(
             ui,
-            "📊 Живая телеметрия кольцевого буфера ОЗУ",
+            &format!("{}  Живая телеметрия кольцевого буфера ОЗУ", M3Icon::LIGHTNING),
             Some("Статус оперативной памяти и алгоритм циклического вытеснения"),
             |ui| {
                 let ram_mb = state.current_ram_bytes / (1024 * 1024);
@@ -1149,7 +1266,7 @@ impl OmniClipApp {
         // Section 1: Microphone & Noise Gate
         self.render_section_card(
             ui,
-            "🎙 Микрофон и шумоподавление (Input Audio)",
+            &format!("{}  Микрофон и шумоподавление (Input Audio)", M3Icon::MIC),
             Some("Низколатентный захват речи с настройкой активации голосом и Push-to-Talk"),
             |ui| {
                 let mut mic_on = state.mic_enabled;
@@ -1252,7 +1369,7 @@ impl OmniClipApp {
         // Section 2: Game / Desktop Audio & App Filter
         self.render_section_card(
             ui,
-            "🔊 Системный звук и приложения (WASAPI Loopback)",
+            &format!("{}  Системный звук и приложения (WASAPI Loopback)", M3Icon::AUDIO),
             Some("Прямой перехват аудиопотока Windows без потери качества с фильтрацией приложений"),
             |ui| {
                 let mut game_on = state.game_audio_enabled;
@@ -1342,50 +1459,171 @@ impl OmniClipApp {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let filter_hint = if state.audio_app_filter_mode == "include" {
-                                    "Записывать звук только из отмеченных приложений:"
+                                    format!("{}  Записывать звук только из отмеченных приложений:", M3Icon::CHECK)
                                 } else {
-                                    "Глушить звук из отмеченных приложений (напр. Discord/Spotify):"
+                                    format!("{}  Исключить из записи звуки отмеченных приложений:", M3Icon::MUTE)
                                 };
                                 ui.label(RichText::new(filter_hint).color(M3Theme::EGUI_ON_SURFACE).size(12.0).strong());
 
                                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if ui.add(
-                                        egui::Button::new(RichText::new(format!("{}  Сканировать заново", M3Icon::REFRESH)).size(11.0))
-                                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
-                                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
-                                    ).clicked() {
-                                        let apps = crate::audio::enumerate_audio_sessions();
-                                        self.state.write().detected_audio_apps = apps;
+                                    // Quick select actions if apps exist
+                                    if !state.detected_audio_apps.is_empty() {
+                                        if ui.add(
+                                            egui::Button::new(RichText::new("Снять все").size(10.5))
+                                                .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
+                                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                        ).clicked() {
+                                            self.state.write().selected_audio_apps.clear();
+                                        }
+                                        if ui.add(
+                                            egui::Button::new(RichText::new("Выбрать все").size(10.5))
+                                                .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
+                                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                        ).clicked() {
+                                            let all_names: Vec<String> = state
+                                                .detected_audio_apps
+                                                .iter()
+                                                .map(|a| a.name.clone())
+                                                .collect();
+                                            self.state.write().selected_audio_apps = all_names;
+                                        }
                                     }
+
+                                    // Real-time live status indicator with pulsing dot
+                                    let pulse_alpha = ((self.pulse_phase.sin() * 0.35 + 0.65) * 255.0) as u8;
+                                    let pulse_color = Color32::from_rgba_premultiplied(76, 175, 80, pulse_alpha);
+                                    ui.horizontal(|ui| {
+                                        let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
+                                        ui.painter().circle_filled(dot_rect.center(), 3.5, pulse_color);
+                                        ui.label(RichText::new("В реальном времени").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
+                                    });
                                 });
                             });
 
                             ui.add_space(8.0);
-                            let mut selected_apps = state.selected_audio_apps.clone();
-                            let mut apps_changed = false;
 
-                            ui.horizontal_wrapped(|ui| {
-                                for app in &state.detected_audio_apps {
-                                    let mut is_checked = selected_apps.contains(app);
-                                    let checkbox = ui.checkbox(
-                                        &mut is_checked,
-                                        RichText::new(app).color(M3Theme::EGUI_ON_SURFACE).size(12.0),
-                                    );
-                                    if checkbox.changed() {
-                                        if is_checked {
-                                            if !selected_apps.contains(app) {
-                                                selected_apps.push(app.clone());
-                                            }
+                            if state.detected_audio_apps.is_empty() {
+                                egui::Frame::NONE
+                                    .fill(M3Theme::EGUI_SURFACE_CONTAINER_LOW)
+                                    .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
+                                    .corner_radius(CornerRadius::same(M3Theme::RADIUS_SM_U8))
+                                    .inner_margin(egui::Margin::symmetric(14, 10))
+                                    .show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new(M3Icon::AUDIO).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(14.0));
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                RichText::new("Сейчас ни одно приложение не воспроизводит звук. Запустите музыку, видео или игру — они появятся здесь автоматически.")
+                                                    .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                                    .size(11.5),
+                                            );
+                                        });
+                                    });
+                            } else {
+                                let mut selected_apps = state.selected_audio_apps.clone();
+                                let mut apps_changed = false;
+
+                                ui.horizontal_wrapped(|ui| {
+                                    for app in &state.detected_audio_apps {
+                                        let is_checked = selected_apps.iter().any(|s| s.eq_ignore_ascii_case(&app.name));
+
+                                        let (bg_color, stroke_color, stroke_width) = if is_checked {
+                                            (
+                                                Color32::from_rgba_premultiplied(38, 68, 131, 160),
+                                                M3Theme::EGUI_PRIMARY,
+                                                1.5_f32,
+                                            )
                                         } else {
-                                            selected_apps.retain(|a| a != app);
-                                        }
-                                        apps_changed = true;
-                                    }
-                                }
-                            });
+                                            (
+                                                M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST,
+                                                M3Theme::EGUI_OUTLINE_VARIANT,
+                                                1.0_f32,
+                                            )
+                                        };
 
-                            if apps_changed {
-                                self.state.write().selected_audio_apps = selected_apps;
+                                        let frame = egui::Frame::NONE
+                                            .fill(bg_color)
+                                            .stroke(Stroke::new(stroke_width, stroke_color))
+                                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_SM_U8))
+                                            .inner_margin(egui::Margin::symmetric(10, 7));
+
+                                        let card_res = frame.show(ui, |ui| {
+                                            ui.set_min_width(175.0);
+                                            ui.vertical(|ui| {
+                                                // Header: Checkmark box + App Icon + App Name
+                                                ui.horizontal(|ui| {
+                                                    let (check_glyph, check_col) = if is_checked {
+                                                        ("☑", M3Theme::EGUI_PRIMARY)
+                                                    } else {
+                                                        ("☐", M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                                    };
+                                                    ui.label(RichText::new(check_glyph).color(check_col).size(13.0).strong());
+
+                                                    // Real application icon (or fallback badge)
+                                                    if let Some(tex) = self.get_or_load_app_icon(ui.ctx(), &app.name, &app.exe_path) {
+                                                        ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(18.0, 18.0)));
+                                                    } else {
+                                                        let fallback = if app.name.to_lowercase().ends_with(".exe") {
+                                                            "🎮"
+                                                        } else {
+                                                            M3Icon::AUDIO
+                                                        };
+                                                        ui.label(RichText::new(fallback).size(12.0));
+                                                    }
+
+                                                    ui.label(RichText::new(&app.name).color(M3Theme::EGUI_ON_SURFACE).size(12.0).strong());
+                                                });
+
+                                                ui.add_space(3.0);
+
+                                                // Footer: Live VU volume meter or idle status
+                                                ui.horizontal(|ui| {
+                                                    ui.add_space(16.0);
+                                                    if app.is_playing || app.peak > 0.005 {
+                                                        ui.label(RichText::new(M3Icon::AUDIO).color(M3Theme::EGUI_STATUS_GREEN).size(11.0));
+
+                                                        let bar_w = 60.0_f32;
+                                                        let bar_h = 4.0_f32;
+                                                        let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::hover());
+                                                        ui.painter().rect_filled(rect, CornerRadius::same(2), Color32::from_rgb(20, 22, 28));
+
+                                                        let fill_w = (rect.width() * app.peak.clamp(0.0, 1.0)).max(2.0);
+                                                        let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height()));
+                                                        let meter_color = if app.peak > 0.85 {
+                                                            M3Theme::EGUI_PRIMARY
+                                                        } else {
+                                                            M3Theme::EGUI_STATUS_GREEN
+                                                        };
+                                                        ui.painter().rect_filled(fill_rect, CornerRadius::same(2), meter_color);
+
+                                                        let pct = (app.peak * 100.0).clamp(0.0, 100.0) as u32;
+                                                        ui.label(RichText::new(format!("{}%", pct)).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(10.0));
+                                                    } else {
+                                                        ui.label(RichText::new(M3Icon::PAUSE).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
+                                                        ui.label(RichText::new("Тишина").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(10.0));
+                                                    }
+                                                });
+                                            });
+                                        });
+
+                                        let interact = ui.interact(card_res.response.rect, ui.id().with(&app.name), egui::Sense::click());
+                                        if interact.clicked() {
+                                            if is_checked {
+                                                selected_apps.retain(|s| !s.eq_ignore_ascii_case(&app.name));
+                                            } else {
+                                                selected_apps.push(app.name.clone());
+                                            }
+                                            apps_changed = true;
+                                        }
+                                        if interact.hovered() {
+                                            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                                        }
+                                    }
+                                });
+
+                                if apps_changed {
+                                    self.state.write().selected_audio_apps = selected_apps;
+                                }
                             }
                         });
                 }
@@ -1397,7 +1635,7 @@ impl OmniClipApp {
         // Section 3: Audio Codec & Multi-Track
         self.render_section_card(
             ui,
-            "🎚 Формат кодировщика AAC и аудиодорожки",
+            &format!("{}  Формат кодировщика AAC и аудиодорожки", M3Icon::EQUALIZER),
             Some("Битрейт, частота дискретизации и разделение дорожек для видеомонтажа"),
             |ui| {
                 self.render_row(ui, |ui| {
@@ -1452,7 +1690,7 @@ impl OmniClipApp {
     fn render_tab_hotkeys(&self, ui: &mut egui::Ui, state: &UiState) {
         self.render_section_card(
             ui,
-            "⌨ Горячие клавиши управления",
+            &format!("{}  Горячие клавиши управления", M3Icon::KEYBOARD),
             Some("Низкоуровневые глобальные комбинации клавиш Win32, работающие поверх любых игр"),
             |ui| {
                 let ptt_display = if state.mic_mode_ptt { &state.mic_ptt_key } else { "ВЫКЛ (Always On)" };
@@ -1524,7 +1762,7 @@ impl OmniClipApp {
 
         Self::card(
             ui,
-            "📁 Папка сохранения и шаблон имен файлов",
+            &format!("{}  Папка сохранения и шаблон имен файлов", M3Icon::FOLDER),
             Some("Настройка путей сохранения, автоматического именования и уведомлений"),
             |ui| {
                 Self::row(ui, |ui| {
@@ -1547,7 +1785,7 @@ impl OmniClipApp {
 
                     let browse_btn = ui.add(
                         egui::Button::new(
-                            RichText::new("📁  Обзор...")
+                            RichText::new(format!("{}  Обзор...", M3Icon::FOLDER))
                                 .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
                                 .size(11.5)
                                 .strong(),
@@ -1667,7 +1905,7 @@ impl OmniClipApp {
 
         self.render_section_card(
             ui,
-            "🎬 История записей за текущую сессию",
+            &format!("{}  История записей за текущую сессию", M3Icon::VIDEO),
             Some("Быстрый доступ к сохраненным видеоклипам и открытие в Проводнике"),
             |ui| {
                 if state.recent_replays.is_empty() {
@@ -1817,6 +2055,215 @@ impl OmniClipApp {
             });
         });
     }
+
+    /// Retrieves or loads the cached egui icon texture for an application.
+    ///
+    /// # Arguments
+    /// * `ctx` - The egui context used to allocate textures.
+    /// * `name` - The process executable name (e.g. "firefox.exe").
+    /// * `exe_path` - The absolute path to the executable file, if known.
+    ///
+    /// # Returns
+    /// An `Option<egui::TextureHandle>` containing the GPU texture handle, or `None` if unavailable.
+    fn get_or_load_app_icon(
+        &self,
+        ctx: &egui::Context,
+        name: &str,
+        exe_path: &str,
+    ) -> Option<egui::TextureHandle> {
+        let cache_key = if !exe_path.is_empty() {
+            exe_path.to_lowercase()
+        } else {
+            name.to_lowercase()
+        };
+
+        if let Ok(cache) = self.app_icon_textures.lock() {
+            if let Some(cached) = cache.get(&cache_key) {
+                return cached.clone();
+            }
+        }
+
+        let path_to_try = if !exe_path.is_empty() {
+            exe_path.to_string()
+        } else {
+            let candidate_sys32 = format!(r"C:\Windows\System32\{}", name);
+            if std::path::Path::new(&candidate_sys32).exists() {
+                candidate_sys32
+            } else {
+                name.to_string()
+            }
+        };
+
+        let texture_handle = extract_icon_from_exe(&path_to_try).map(|color_image| {
+            ctx.load_texture(
+                format!("app_icon_{}", name),
+                color_image,
+                egui::TextureOptions::LINEAR,
+            )
+        });
+
+        if let Ok(mut cache) = self.app_icon_textures.lock() {
+            cache.insert(cache_key, texture_handle.clone());
+        }
+
+        texture_handle
+    }
+}
+
+/// Extracts an application's icon from its executable PE headers and converts it to an `egui::ColorImage`.
+///
+/// Win32 GDI handles must be explicitly destroyed and released to prevent resource exhaustion.
+///
+/// # Arguments
+/// * `exe_path` - The absolute path to the executable.
+///
+/// # Returns
+/// An `Option<egui::ColorImage>` containing 32-bit RGBA pixels, or `None` if extraction fails.
+fn extract_icon_from_exe(exe_path: &str) -> Option<egui::ColorImage> {
+    use windows::Win32::UI::Shell::ExtractIconExW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetIconInfo, DestroyIcon, HICON, ICONINFO,
+    };
+    use windows::Win32::Graphics::Gdi::{
+        CreateCompatibleDC, DeleteDC, DeleteObject, GetObjectW, GetDIBits,
+        BITMAP, BITMAPINFO, BITMAPINFOHEADER, DIB_RGB_COLORS, BI_RGB,
+    };
+
+    if exe_path.is_empty() {
+        return None;
+    }
+
+    let path_u16: Vec<u16> = exe_path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut hicon_large = HICON::default();
+    let mut hicon_small = HICON::default();
+
+    unsafe {
+        let count = ExtractIconExW(
+            windows::core::PCWSTR(path_u16.as_ptr()),
+            0,
+            Some(&mut hicon_large),
+            Some(&mut hicon_small),
+            1,
+        );
+
+        if count == 0 {
+            return None;
+        }
+
+        // Prefer large icon (32x32) for crisp high-DPI downsampling, fallback to small (16x16)
+        let (hicon_to_use, hicon_to_destroy) = if !hicon_large.is_invalid() {
+            (hicon_large, hicon_small)
+        } else if !hicon_small.is_invalid() {
+            (hicon_small, hicon_large)
+        } else {
+            return None;
+        };
+
+        if !hicon_to_destroy.is_invalid() {
+            let _ = DestroyIcon(hicon_to_destroy);
+        }
+
+        let mut icon_info = ICONINFO::default();
+        if GetIconInfo(hicon_to_use, &mut icon_info).is_err() {
+            let _ = DestroyIcon(hicon_to_use);
+            return None;
+        }
+
+        let target_hbm = if !icon_info.hbmColor.is_invalid() {
+            icon_info.hbmColor
+        } else {
+            icon_info.hbmMask
+        };
+
+        let mut bmp = BITMAP::default();
+        let get_obj_res = GetObjectW(
+            target_hbm,
+            std::mem::size_of::<BITMAP>() as i32,
+            Some(&mut bmp as *mut _ as *mut _),
+        );
+
+        if get_obj_res == 0 || bmp.bmWidth <= 0 || bmp.bmHeight <= 0 {
+            let _ = DeleteObject(icon_info.hbmColor);
+            let _ = DeleteObject(icon_info.hbmMask);
+            let _ = DestroyIcon(hicon_to_use);
+            return None;
+        }
+
+        let width = bmp.bmWidth;
+        let height = if icon_info.hbmColor.is_invalid() {
+            bmp.bmHeight / 2
+        } else {
+            bmp.bmHeight
+        };
+
+        let hdc = CreateCompatibleDC(None);
+        if hdc.is_invalid() {
+            let _ = DeleteObject(icon_info.hbmColor);
+            let _ = DeleteObject(icon_info.hbmMask);
+            let _ = DestroyIcon(hicon_to_use);
+            return None;
+        }
+
+        let mut bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: width,
+                biHeight: -height, // Negative indicates top-down bitmap orientation
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let pixel_count = (width * height) as usize;
+        let mut raw_pixels = vec![0u8; pixel_count * 4];
+
+        let scan_lines = GetDIBits(
+            hdc,
+            target_hbm,
+            0,
+            height.unsigned_abs(),
+            Some(raw_pixels.as_mut_ptr() as *mut _),
+            &mut bi,
+            DIB_RGB_COLORS,
+        );
+
+        let _ = DeleteDC(hdc);
+        let _ = DeleteObject(icon_info.hbmColor);
+        let _ = DeleteObject(icon_info.hbmMask);
+        let _ = DestroyIcon(hicon_to_use);
+
+        if scan_lines == 0 {
+            return None;
+        }
+
+        // Detect whether the icon contains true 32-bit ARGB alpha transparency
+        let mut has_alpha = false;
+        for chunk in raw_pixels.chunks_exact(4) {
+            if chunk[3] > 0 {
+                has_alpha = true;
+                break;
+            }
+        }
+
+        // Convert BGRA to RGBA in-place and synthesize alpha if missing from legacy DIB
+        for chunk in raw_pixels.chunks_exact_mut(4) {
+            let b = chunk[0];
+            let r = chunk[2];
+            chunk[0] = r;
+            chunk[2] = b;
+            if !has_alpha {
+                chunk[3] = 255;
+            }
+        }
+
+        Some(egui::ColorImage::from_rgba_unmultiplied(
+            [width as usize, height as usize],
+            &raw_pixels,
+        ))
+    }
 }
 
 #[cfg(test)]
@@ -1876,5 +2323,27 @@ mod tests {
                 assert!(!changed);
             });
         });
+    }
+
+    #[test]
+    fn test_extract_icon_from_exe() {
+        let test_paths = [
+            r"C:\Windows\System32\notepad.exe",
+            r"C:\Windows\explorer.exe",
+            r"C:\Windows\System32\cmd.exe",
+        ];
+        let mut extracted_any = false;
+        for path in &test_paths {
+            if std::path::Path::new(path).exists() {
+                if let Some(img) = extract_icon_from_exe(path) {
+                    assert!(img.width() > 0);
+                    assert!(img.height() > 0);
+                    assert_eq!(img.pixels.len(), img.width() * img.height());
+                    extracted_any = true;
+                    break;
+                }
+            }
+        }
+        assert!(extracted_any);
     }
 }

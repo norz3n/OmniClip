@@ -760,27 +760,93 @@ pub fn enumerate_audio_devices(is_capture: bool) -> Vec<(String, String)> {
     .unwrap_or_default()
 }
 
-/// Enumerates running applications that have active audio sessions.
-pub fn enumerate_audio_sessions() -> Vec<String> {
-    // Run COM enumeration in an isolated worker thread to avoid tainting caller thread's COM apartment (STA / MTA)
-    std::thread::spawn(|| {
-        let mut apps = Vec::new();
-        unsafe {
-            let com_init = CoInitializeEx(None, COINIT_MULTITHREADED).is_ok();
-            if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-                if let Ok(device) = enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-                    if let Ok(session_mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
-                        if let Ok(session_enum) = session_mgr.GetSessionEnumerator() {
-                            if let Ok(count) = session_enum.GetCount() {
-                                for i in 0..count {
-                                    if let Ok(session) = session_enum.GetSession(i) {
-                                        use windows::core::Interface;
-                                        if let Ok(ctrl) = session.cast::<IAudioSessionControl2>() {
-                                            if let Ok(pid) = ctrl.GetProcessId() {
-                                                if pid > 0 {
-                                                    if let Ok(name) = get_process_name(pid) {
-                                                        if !apps.contains(&name) && !name.is_empty() {
-                                                            apps.push(name);
+/// Real-time audio session application metadata.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AudioAppInfo {
+    /// Executable filename (e.g. "firefox.exe", "Discord.exe").
+    pub name: String,
+    /// Absolute filesystem path to the executable file.
+    pub exe_path: String,
+    /// Operating system process identifier.
+    pub pid: u32,
+    /// Real-time peak volume meter value ranging from 0.0 to 1.0.
+    pub peak: f32,
+    /// Indicates whether the session currently has active audio output.
+    pub is_playing: bool,
+}
+
+/// Scans active WASAPI audio sessions and returns applications currently emitting audio.
+///
+/// Filters out silent idle processes, Windows internal services, and OmniClip's own process.
+/// Enumerate all active render endpoints to ensure applications outputting to headphones,
+/// speakers, or secondary devices are detected.
+///
+/// # Returns
+/// A list of `AudioAppInfo` entries for applications producing sound.
+pub fn scan_active_audio_sessions() -> Vec<AudioAppInfo> {
+    use windows::Win32::Media::Audio::Endpoints::IAudioMeterInformation;
+    use windows::core::Interface;
+
+    let my_pid = std::process::id();
+    let mut apps: Vec<AudioAppInfo> = Vec::new();
+
+    unsafe {
+        let com_init = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let needs_uninit = com_init.is_ok();
+
+        if let Ok(enumerator) = CoCreateInstance::<_, IMMDeviceEnumerator>(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            if let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+                if let Ok(dev_count) = collection.GetCount() {
+                    for d in 0..dev_count {
+                        if let Ok(device) = collection.Item(d) {
+                            if let Ok(session_mgr) = device.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None) {
+                                if let Ok(session_enum) = session_mgr.GetSessionEnumerator() {
+                                    if let Ok(count) = session_enum.GetCount() {
+                                        for i in 0..count {
+                                            if let Ok(session) = session_enum.GetSession(i) {
+                                                if let Ok(ctrl) = session.cast::<IAudioSessionControl2>() {
+                                                    if let Ok(pid) = ctrl.GetProcessId() {
+                                                        if pid == 0 || pid == my_pid {
+                                                            continue;
+                                                        }
+                                                        // Skip Windows internal system sounds session (HRESULT 0 is S_OK, HRESULT 1 is S_FALSE)
+                                                        if ctrl.IsSystemSoundsSession() == windows::core::HRESULT(0) {
+                                                            continue;
+                                                        }
+
+                                                        let state = session.GetState().unwrap_or(AudioSessionStateInactive);
+                                                        let peak = if let Ok(meter) = session.cast::<IAudioMeterInformation>() {
+                                                            meter.GetPeakValue().unwrap_or(0.0)
+                                                        } else {
+                                                            0.0
+                                                        };
+
+                                                        let is_playing = state == AudioSessionStateActive || peak > 0.0005;
+
+                                                        // Only consider processes that are currently playing sound or active
+                                                        if !is_playing {
+                                                            continue;
+                                                        }
+
+                                                        if let Ok((name, exe_path)) = get_process_info(pid) {
+                                                            if name.is_empty() {
+                                                                continue;
+                                                            }
+                                                            if let Some(existing) = apps.iter_mut().find(|a| a.name.eq_ignore_ascii_case(&name)) {
+                                                                existing.peak = existing.peak.max(peak);
+                                                                existing.is_playing = existing.is_playing || is_playing;
+                                                                if existing.exe_path.is_empty() && !exe_path.is_empty() {
+                                                                    existing.exe_path = exe_path;
+                                                                }
+                                                            } else {
+                                                                apps.push(AudioAppInfo {
+                                                                    name,
+                                                                    exe_path,
+                                                                    pid,
+                                                                    peak,
+                                                                    is_playing,
+                                                                });
+                                                            }
                                                         }
                                                     }
                                                 }
@@ -793,30 +859,29 @@ pub fn enumerate_audio_sessions() -> Vec<String> {
                     }
                 }
             }
-            if com_init {
-                CoUninitialize();
-            }
         }
-        if apps.is_empty() {
-            apps = vec![
-                "Discord.exe".to_string(),
-                "Spotify.exe".to_string(),
-                "chrome.exe".to_string(),
-                "Telegram.exe".to_string(),
-            ];
+
+        if needs_uninit {
+            CoUninitialize();
         }
-        apps
-    })
-    .join()
-    .unwrap_or_else(|_| vec![
-        "Discord.exe".to_string(),
-        "Spotify.exe".to_string(),
-        "chrome.exe".to_string(),
-        "Telegram.exe".to_string(),
-    ])
+    }
+
+    apps
 }
 
-unsafe fn get_process_name(pid: u32) -> Result<String> {
+/// Enumerates running applications that have active audio sessions.
+///
+/// # Returns
+/// A list of executable names for running audio applications.
+pub fn enumerate_audio_sessions() -> Vec<String> {
+    scan_active_audio_sessions()
+        .into_iter()
+        .map(|a| a.name)
+        .collect()
+}
+
+/// Queries process image path and extracts binary filename and absolute path.
+unsafe fn get_process_info(pid: u32) -> Result<(String, String)> {
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT,
     };
@@ -836,8 +901,8 @@ unsafe fn get_process_name(pid: u32) -> Result<String> {
         let filename = std::path::Path::new(&full)
             .file_name()
             .map(|f| f.to_string_lossy().to_string())
-            .unwrap_or(full);
-        Ok(filename)
+            .unwrap_or_else(|| full.clone());
+        Ok((filename, full))
     } else {
         Err(anyhow!("Process query failed"))
     }
@@ -914,7 +979,8 @@ mod tests {
 
     #[test]
     fn test_enumerate_audio_sessions_smoke() {
+        let active = scan_active_audio_sessions();
         let sessions = enumerate_audio_sessions();
-        assert!(!sessions.is_empty(), "Audio session enumeration should return active or default applications");
+        assert_eq!(active.len(), sessions.len());
     }
 }
