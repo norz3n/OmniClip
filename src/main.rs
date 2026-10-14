@@ -347,8 +347,9 @@ fn main() -> Result<()> {
                         match action {
                             UiAction::SaveReplay => {
                                 info!("UI requested replay dump!");
-                                let rb = ring_buffer_capture.lock();
-                                if let Some(snapshot) = rb.snapshot() {
+                                let mut rb = ring_buffer_capture.lock();
+                                if let Some(snapshot) = rb.take_snapshot() {
+                                    ui_state_clone.write().set_current_ram_bytes(0);
                                     let (pattern, out_dir) = {
                                         let st = ui_state_clone.read();
                                         (st.filename_pattern.clone(), st.output_dir.clone())

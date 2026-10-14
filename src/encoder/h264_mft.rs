@@ -389,7 +389,7 @@ impl H264Encoder {
                             out_sample
                         };
                         if let Some(s) = sample_opt {
-                            if let Some(chunk) = Self::sample_to_chunk(&s)? {
+                            if let Some(chunk) = self.sample_to_chunk(&s)? {
                                 chunks.push(chunk);
                             }
                         }
@@ -412,7 +412,7 @@ impl H264Encoder {
 
 
     /// Converts an encoded IMFSample to a VideoChunk with PTS, duration, and keyframe detection.
-    fn sample_to_chunk(sample: &IMFSample) -> Result<Option<VideoChunk>> {
+    fn sample_to_chunk(&self, sample: &IMFSample) -> Result<Option<VideoChunk>> {
         let pts = unsafe { sample.GetSampleTime().unwrap_or(0) };
         let duration = unsafe { sample.GetSampleDuration().unwrap_or(166_666) };
 
@@ -448,7 +448,7 @@ impl H264Encoder {
         }
 
         let slice = unsafe { std::slice::from_raw_parts(ptr, cur_len as usize) };
-        let is_idr_nalu = Self::has_idr_nalu(slice);
+        let is_idr_nalu = Self::has_idr_nalu(slice, self.codec);
         let is_keyframe = is_clean_point || is_idr_nalu;
 
         let data = slice.to_vec();
@@ -466,27 +466,43 @@ impl H264Encoder {
         }))
     }
 
-    /// Scans H.264 byte stream for IDR NAL units (nal_unit_type == 5 or 7 SPS).
-    fn has_idr_nalu(data: &[u8]) -> bool {
+    /// Scans byte stream for IDR/parameter set NAL units for H.264 or HEVC.
+    fn has_idr_nalu(data: &[u8], codec: crate::buffer::chunk::VideoCodec) -> bool {
         let mut i = 0;
-        while i + 4 < data.len() {
-            // Check 4-byte start code 0x00 0x00 0x00 0x01
-            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
-                let nal_type = data[i + 4] & 0x1F;
-                if nal_type == 5 || nal_type == 7 {
-                    return true;
-                }
-                i += 4;
+        while i + 3 < data.len() {
+            let (start_code_len, nal_byte_idx) = if i + 4 < data.len()
+                && data[i] == 0
+                && data[i + 1] == 0
+                && data[i + 2] == 0
+                && data[i + 3] == 1
+            {
+                (4, i + 4)
             } else if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
-                // Check 3-byte start code 0x00 0x00 0x01
-                let nal_type = data[i + 3] & 0x1F;
-                if nal_type == 5 || nal_type == 7 {
-                    return true;
-                }
-                i += 3;
+                (3, i + 3)
             } else {
                 i += 1;
+                continue;
+            };
+
+            let nal_byte = data[nal_byte_idx];
+            match codec {
+                crate::buffer::chunk::VideoCodec::H264 => {
+                    let nal_type = nal_byte & 0x1F;
+                    if nal_type == 5 || nal_type == 7 {
+                        return true;
+                    }
+                }
+                crate::buffer::chunk::VideoCodec::Hevc => {
+                    let nal_type = (nal_byte >> 1) & 0x3F;
+                    // In HEVC:
+                    // 16..=21 are IRAP picture types (IDR_W_RADL, IDR_N_LP, CRA, BLA)
+                    // 32 = VPS, 33 = SPS, 34 = PPS
+                    if (16..=21).contains(&nal_type) || (32..=34).contains(&nal_type) {
+                        return true;
+                    }
+                }
             }
+            i += start_code_len;
         }
         false
     }
