@@ -579,9 +579,9 @@ fn main() -> Result<()> {
         (GetSystemMetrics(SM_CXSCREEN) as f32, GetSystemMetrics(SM_CYSCREEN) as f32)
     };
 
-    // Center a spacious 940x560 Material Design 3 Control Hub on the primary monitor.
+    // Center a spacious 940x620 Material Design 3 Control Hub on the primary monitor.
     let win_w = 940.0;
-    let win_h = 560.0;
+    let win_h = 620.0;
     let pos_x = ((screen_w - win_w) / 2.0).max(0.0);
     let pos_y = ((screen_h - win_h) / 2.0).max(0.0);
 
