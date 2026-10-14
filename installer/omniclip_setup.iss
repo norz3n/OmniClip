@@ -24,6 +24,7 @@ AllowNoIcons=yes
 OutputDir=..\dist
 OutputBaseFilename=OmniClip_Setup_{#MyAppVersion}
 SetupIconFile=..\assets\logo.ico
+LicenseFile=..\LICENSE
 Compression=lzma2/ultra64
 SolidCompression=yes
 WizardStyle=modern
@@ -46,6 +47,7 @@ Name: "autostart"; Description: "Запускать OmniClip при старте
 Source: "..\target\release\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\assets\logo.ico"; DestDir: "{app}\assets"; Flags: ignoreversion
 Source: "..\assets\logo.svg"; DestDir: "{app}\assets"; Flags: ignoreversion
+Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: isreadme ignoreversion; Tasks: 
 
 [Icons]

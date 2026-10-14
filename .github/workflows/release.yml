@@ -71,7 +71,12 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup --no-progress -y
-          "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append
+          $isccDir = (Get-ChildItem "C:\Program Files*\Inno Setup*" -Recurse -Filter "iscc.exe" -ErrorAction SilentlyContinue | Select-Object -First 1).DirectoryName
+          if ($isccDir) {
+              $isccDir | Out-File -FilePath $env:GITHUB_PATH -Append
+          } else {
+              "C:\Program Files (x86)\Inno Setup 6" | Out-File -FilePath $env:GITHUB_PATH -Append
+          }
 
       - name: Compile Inno Setup installer
         if: env.SHOULD_RELEASE == 'true'
@@ -86,7 +91,7 @@ jobs:
         run: |
           $ver = $env:APP_VERSION
           $portableZip = "dist/OmniClip_v$($ver)_Portable.zip"
-          Compress-Archive -Path target/release/omni_clip.exe, assets/logo.ico, README.md -DestinationPath $portableZip
+          Compress-Archive -Path target/release/omni_clip.exe, assets/logo.ico, README.md, LICENSE -DestinationPath $portableZip
           
           Get-FileHash -Algorithm SHA256 (Get-ChildItem dist/*.*) | ForEach-Object {
               "$($_.Hash)  $($_.Path | Split-Path -Leaf)"
