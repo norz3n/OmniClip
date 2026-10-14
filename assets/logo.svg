@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Deep Minimal Dark Background -->
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#151722"/>
+      <stop offset="100%" stop-color="#0A0B10"/>
+    </linearGradient>
+
+    <!-- Electric Cyan-Blue Gradient for the Buffer Arc -->
+    <linearGradient id="arcGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#2563EB"/>
+      <stop offset="60%" stop-color="#38BDF8"/>
+      <stop offset="100%" stop-color="#93C5FD"/>
+    </linearGradient>
+
+    <!-- Clean Crisp Play Triangle Gradient -->
+    <linearGradient id="playGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#D6E4FF"/>
+    </linearGradient>
+  </defs>
+
+  <!-- 1. Minimal Squircle Tile -->
+  <rect x="32" y="32" width="448" height="448" rx="116" fill="url(#bg)" stroke="#1F2332" stroke-width="2"/>
+
+  <!-- 2. "Omni" Rolling Buffer Loop (Single, Bold, Continuous Minimal Arc) -->
+  <path d="M 358,358 
+           A 144,144 0 1,1 254,112"
+        fill="none"
+        stroke="url(#arcGrad)"
+        stroke-width="26"
+        stroke-linecap="round"/>
+
+  <!-- Seamless Integrated Arrowhead (Continuous with the Arc Motion) -->
+  <path d="M 248,88 
+           C 248,84 253,82 257,85 
+           L 294,108 
+           C 298,111 298,117 294,120 
+           L 257,143 
+           C 253,146 248,144 248,140 
+           Z"
+        fill="#93C5FD"/>
+
+  <!-- 3. "Clip" Core (Pure, Optically Centered Rounded Play Geometry) -->
+  <path d="M 226,186
+           C 215,178 200,186 200,200
+           L 200,312
+           C 200,326 215,334 226,326
+           L 322,270
+           C 333,263 333,249 322,242
+           Z"
+        fill="url(#playGrad)"/>
+</svg>
