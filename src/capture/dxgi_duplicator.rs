@@ -45,7 +45,50 @@ pub struct DxgiDuplicator {
     refresh_rate_denominator: u32,
 }
 
+/// Detailed information about an active display monitor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayInfo {
+    pub index: u32,
+    pub name: String,
+    pub width: u32,
+    pub height: u32,
+    pub is_primary: bool,
+}
+
 impl DxgiDuplicator {
+    /// Static helper to enumerate attached displays on the current GPU adapter.
+    pub fn enumerate_adapter_displays(context: &D3D11Context) -> Vec<DisplayInfo> {
+        let adapter = context.adapter();
+        let mut list = Vec::new();
+        let mut idx = 0u32;
+        while let Ok(output) = unsafe { adapter.EnumOutputs(idx) } {
+            if let Ok(desc) = unsafe { output.GetDesc() } {
+                let width = (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).unsigned_abs();
+                let height = (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).unsigned_abs();
+                if desc.AttachedToDesktop.as_bool() && width > 0 && height > 0 {
+                    let raw_name = String::from_utf16_lossy(&desc.DeviceName);
+                    let name = raw_name.trim_matches('\0').to_string();
+                    let is_primary = desc.DesktopCoordinates.left == 0 && desc.DesktopCoordinates.top == 0;
+                    list.push(DisplayInfo {
+                        index: idx,
+                        name,
+                        width,
+                        height,
+                        is_primary,
+                    });
+                }
+            }
+            idx += 1;
+        }
+        list
+    }
+
+    /// Switches capture target to a new output monitor index and re-initializes desktop duplication.
+    pub fn switch_display(&mut self, output_index: u32) -> Result<()> {
+        self.output_index = output_index;
+        self.init_duplication()
+    }
+
     /// Creates a new DxgiDuplicator for the specified output index (0 = primary display).
     pub fn new(context: D3D11Context, output_index: u32, timer: QpcTimer) -> Result<Self> {
         let mut duplicator = Self {

@@ -167,10 +167,15 @@ impl M3Theme {
             prop.insert(0, "Montserrat".to_owned());
         }
 
-        // 2. Vector Icon Typography: Segoe MDL2 Assets
+        // 2. Vector Icon Typography: Segoe MDL2 Assets with optical alignment tweak
+        let icon_tweak = egui::FontTweak {
+            scale: 0.88,
+            y_offset_factor: 0.14,
+            ..Default::default()
+        };
         fonts.font_data.insert(
             "SegoeMDL2".to_owned(),
-            std::sync::Arc::new(egui::FontData::from_static(FONT_SEGOE_MDL2)),
+            std::sync::Arc::new(egui::FontData::from_static(FONT_SEGOE_MDL2).tweak(icon_tweak)),
         );
         if let Some(prop) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             prop.push("SegoeMDL2".to_owned());
@@ -267,8 +272,8 @@ impl M3Icon {
     pub const MIC: &'static str = "\u{E720}";
     /// Keyboard shortcut icon (U+E765).
     pub const KEYBOARD: &'static str = "\u{E765}";
-    /// File folder icon (U+E8B7).
-    pub const FOLDER: &'static str = "\u{E8B7}";
+    /// File folder icon (U+E838).
+    pub const FOLDER: &'static str = "\u{E838}";
     /// Disk save icon (U+E74E).
     pub const SAVE: &'static str = "\u{E74E}";
     /// Play recording icon (U+E768).
@@ -325,7 +330,7 @@ mod tests {
         assert_eq!(M3Icon::AUDIO, "\u{E767}");
         assert_eq!(M3Icon::MIC, "\u{E720}");
         assert_eq!(M3Icon::KEYBOARD, "\u{E765}");
-        assert_eq!(M3Icon::FOLDER, "\u{E8B7}");
+        assert_eq!(M3Icon::FOLDER, "\u{E838}");
         assert_eq!(M3Icon::EQUALIZER, "\u{E9E9}");
         assert_eq!(M3Icon::SLIDERS, "\u{E71D}");
         assert_eq!(M3Icon::PAUSE, "\u{E769}");

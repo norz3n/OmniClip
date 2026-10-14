@@ -20,6 +20,7 @@ pub struct RingBuffer {
     fps: u32,
     audio_sample_rate: u32,
     audio_channels: u32,
+    codec: crate::buffer::chunk::VideoCodec,
     has_seen_first_keyframe: bool,
 }
 
@@ -41,6 +42,7 @@ impl RingBuffer {
             width,
             height,
             fps,
+            codec: crate::buffer::chunk::VideoCodec::H264,
             audio_sample_rate,
             audio_channels,
             has_seen_first_keyframe: false,
@@ -52,6 +54,11 @@ impl RingBuffer {
         self.width = width;
         self.height = height;
         self.fps = fps;
+    }
+
+    /// Sets the compression codec recorded in the ring buffer.
+    pub fn set_codec(&mut self, codec: crate::buffer::chunk::VideoCodec) {
+        self.codec = codec;
     }
 
     /// Appends an encoded video chunk to the buffer.
@@ -173,6 +180,7 @@ impl RingBuffer {
             width: self.width,
             height: self.height,
             fps: self.fps,
+            codec: self.codec,
             audio_sample_rate: self.audio_sample_rate,
             audio_channels: self.audio_channels,
         })
@@ -202,6 +210,7 @@ impl RingBuffer {
             width: self.width,
             height: self.height,
             fps: self.fps,
+            codec: self.codec,
             audio_sample_rate: self.audio_sample_rate,
             audio_channels: self.audio_channels,
         };
@@ -251,16 +260,18 @@ pub struct ManualRecordSession {
     pub target_file: PathBuf,
     pub video_chunks: Vec<VideoChunk>,
     pub audio_chunks: Vec<AudioChunk>,
+    pub codec: crate::buffer::chunk::VideoCodec,
     pub waiting_for_keyframe: bool,
 }
 
 impl ManualRecordSession {
     /// Creates a new continuous recording session targeting `target_file`.
-    pub fn new(target_file: PathBuf) -> Self {
+    pub fn new(target_file: PathBuf, codec: crate::buffer::chunk::VideoCodec) -> Self {
         Self {
             target_file,
             video_chunks: Vec::new(),
             audio_chunks: Vec::new(),
+            codec,
             waiting_for_keyframe: true,
         }
     }
@@ -301,6 +312,7 @@ impl ManualRecordSession {
             width,
             height,
             fps,
+            codec: self.codec,
             audio_sample_rate,
             audio_channels,
         };
@@ -332,6 +344,7 @@ pub fn create_shared_ring_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::chunk::VideoCodec;
 
     #[test]
     fn test_ring_buffer_discards_pre_keyframe() {
@@ -493,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_manual_session_discards_pre_keyframe_and_finishes() {
-        let mut session = ManualRecordSession::new(PathBuf::from("test_manual.mp4"));
+        let mut session = ManualRecordSession::new(PathBuf::from("test_manual.mp4"), VideoCodec::H264);
 
         // Push audio before keyframe
         session.push_audio(AudioChunk {
@@ -546,7 +559,7 @@ mod tests {
 
     #[test]
     fn test_manual_session_empty_returns_none() {
-        let session = ManualRecordSession::new(PathBuf::from("test_manual.mp4"));
+        let session = ManualRecordSession::new(PathBuf::from("test_manual.mp4"), VideoCodec::H264);
         assert!(session.finish(1920, 1080, 60, 48000, 2).is_none());
     }
 }

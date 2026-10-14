@@ -122,6 +122,12 @@ fn main() -> Result<()> {
         let mut st = ui_state.write();
         st.filename_pattern = config.filename_pattern.clone();
         st.audio_multi_track = config.audio_multi_track;
+        st.video_codec = config.video_codec;
+        st.selected_display_index = config.display_index;
+        st.hotkey_replay_vk = config.hotkey_vk;
+        st.hotkey_overlay_vk = config.hotkey_overlay_vk;
+        st.hotkey_record_vk = config.hotkey_record_vk;
+        st.hotkey_screenshot_vk = config.hotkey_screenshot_vk;
     }
 
     let ring_buffer = create_shared_ring_buffer(
@@ -132,6 +138,7 @@ fn main() -> Result<()> {
         config.audio_sample_rate,
         config.audio_channels,
     );
+    ring_buffer.lock().set_codec(config.video_codec);
 
     // Audio capture channel
     let timer = QpcTimer::new()?;
@@ -195,7 +202,14 @@ fn main() -> Result<()> {
 
     // Global hotkey listener — single raw receiver
     let (hotkey_tx, hotkey_raw_rx) = crossbeam_channel::bounded(16);
-    let hotkey_listener = match HotkeyListener::spawn(config.hotkey_modifiers, config.hotkey_vk, hotkey_tx) {
+    let hotkey_listener = match HotkeyListener::spawn(
+        config.hotkey_modifiers,
+        config.hotkey_vk,
+        config.hotkey_overlay_vk,
+        config.hotkey_record_vk,
+        config.hotkey_screenshot_vk,
+        hotkey_tx,
+    ) {
         Ok(l) => {
             info!("Hotkeys active: Alt+F10 (Save Replay), Alt+Z (Overlay Hub), Alt+F9 (Manual Record), Alt+F1 (Screenshot)");
             Some(l)
@@ -285,13 +299,23 @@ fn main() -> Result<()> {
 
                 let timer = QpcTimer::new()?;
                 let d3d11_context = D3D11Context::new()?;
+                let displays = DxgiDuplicator::enumerate_adapter_displays(&d3d11_context);
+                info!("DXGI: Found {} connected display outputs", displays.len());
+                let mut active_codec = config_clone.video_codec;
+                {
+                    let mut st = ui_state_clone.write();
+                    st.available_displays = displays;
+                    st.selected_display_index = config_clone.display_index;
+                    st.video_codec = active_codec;
+                }
+
                 let mut duplicator = DxgiDuplicator::new(d3d11_context.clone(), config_clone.display_index, timer.clone())?;
 
-                let width = duplicator.width();
-                let height = duplicator.height();
+                let mut width = duplicator.width();
+                let mut height = duplicator.height();
                 let mut fps = config_clone.fps;
 
-                info!("Display capture ready: {}x{} @ {} fps", width, height, fps);
+                info!("Display capture ready: {}x{} @ {} fps (codec: {:?})", width, height, fps, active_codec);
                 let dev_manager = DxgiDeviceManager::new(d3d11_context.device())?;
                 let mut encoder = H264Encoder::new(
                     &dev_manager,
@@ -300,6 +324,7 @@ fn main() -> Result<()> {
                     fps,
                     config_clone.video_bitrate,
                     config_clone.gop_size,
+                    active_codec,
                 )?;
 
                 let mut frame_duration_hns = config_clone.frame_duration_hns();
@@ -362,7 +387,7 @@ fn main() -> Result<()> {
                                         fps,
                                     );
                                     info!("Capture thread: Starting manual recording -> '{}'", target_file.display());
-                                    manual_session = Some(ManualRecordSession::new(target_file));
+                                    manual_session = Some(ManualRecordSession::new(target_file, active_codec));
                                     {
                                         let mut st = ui_state_clone.write();
                                         st.manual_record_active = true;
@@ -484,6 +509,72 @@ fn main() -> Result<()> {
                                     }
                                 } else {
                                     log::warn!("Screenshot requested, but no desktop frame has been captured yet");
+                                }
+                            }
+                            UiAction::SetVideoCodec(new_codec) => {
+                                if new_codec != active_codec {
+                                    info!("Capture thread: Switching hardware video codec to {:?}", new_codec);
+                                    match H264Encoder::new(
+                                        &dev_manager,
+                                        width,
+                                        height,
+                                        fps,
+                                        config_capture.lock().video_bitrate,
+                                        config_capture.lock().gop_size,
+                                        new_codec,
+                                    ) {
+                                        Ok(new_enc) => {
+                                            encoder = new_enc;
+                                            active_codec = new_codec;
+                                            ring_buffer_capture.lock().set_codec(new_codec);
+                                            config_capture.lock().video_codec = new_codec;
+                                            let _ = config_capture.lock().save();
+                                            ui_state_clone.write().video_codec = new_codec;
+                                            encoder.request_keyframe();
+                                            info!("Hardware video codec switched successfully to {:?}", new_codec);
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to switch video codec to {:?}: {}", new_codec, e);
+                                        }
+                                    }
+                                }
+                            }
+                            UiAction::SetDisplayIndex(new_idx) => {
+                                info!("Capture thread: Switching capture display to output {}", new_idx);
+                                match duplicator.switch_display(new_idx) {
+                                    Ok(()) => {
+                                        let new_w = duplicator.width();
+                                        let new_h = duplicator.height();
+                                        config_capture.lock().display_index = new_idx;
+                                        let _ = config_capture.lock().save();
+                                        ui_state_clone.write().selected_display_index = new_idx;
+                                        if new_w != width || new_h != height {
+                                            width = new_w;
+                                            height = new_h;
+                                            ring_buffer_capture.lock().update_video_format(width, height, fps);
+                                            match H264Encoder::new(
+                                                &dev_manager,
+                                                width,
+                                                height,
+                                                fps,
+                                                config_capture.lock().video_bitrate,
+                                                config_capture.lock().gop_size,
+                                                active_codec,
+                                            ) {
+                                                Ok(new_enc) => {
+                                                    encoder = new_enc;
+                                                    encoder.request_keyframe();
+                                                    info!("Encoder adapted to display resolution: {}x{}", width, height);
+                                                }
+                                                Err(e) => {
+                                                    log::error!("Failed to re-initialize encoder for {}x{}: {}", width, height, e);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        log::error!("Failed to switch to display {}: {}", new_idx, e);
+                                    }
                                 }
                             }
                             UiAction::QuitApplication => {

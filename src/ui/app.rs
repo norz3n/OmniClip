@@ -37,6 +37,10 @@ pub enum UiAction {
     TakeScreenshot,
     /// Change application display language ("auto", "ru", "en").
     SetLanguage(String),
+    /// Change video compression codec (H264 / Hevc).
+    SetVideoCodec(crate::buffer::chunk::VideoCodec),
+    /// Change active capture display index.
+    SetDisplayIndex(u32),
     /// Request clean application shutdown.
     QuitApplication,
 }
@@ -1126,57 +1130,61 @@ impl OmniClipApp {
             .fill(M3Theme::EGUI_SURFACE_CONTAINER)
             .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
             .corner_radius(CornerRadius::same(M3Theme::RADIUS_LG_U8))
-            .inner_margin(16.0)
+            .inner_margin(egui::Margin::symmetric(16, 10))
             .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new(format!("{}  {}", M3Icon::CAMERA, t(TextKey::ActionTakeScreenshot, lang)))
-                            .color(M3Theme::EGUI_ON_SURFACE)
-                            .size(14.0)
-                            .strong(),
-                    );
-                    ui.add_space(8.0);
-                    ui.label(
-                        RichText::new(t(TextKey::DescTakeScreenshot, lang))
-                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
-                            .size(11.5),
-                    );
-
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        let shot_btn = ui.add(
-                            egui::Button::new(
-                                RichText::new(format!("{}  {} (Alt+F1)", M3Icon::CAMERA, t(TextKey::ActionTakeScreenshot, lang)))
-                                    .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
-                                    .size(12.0)
-                                    .strong(),
-                            )
-                            .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
-                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
-                            .min_size(Vec2::new(180.0, 32.0)),
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), 34.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.label(
+                            RichText::new(format!("{}  {}", M3Icon::CAMERA, t(TextKey::ActionTakeScreenshot, lang)))
+                                .color(M3Theme::EGUI_ON_SURFACE)
+                                .size(14.0)
+                                .strong(),
                         );
-                        if shot_btn.clicked() {
-                            let _ = self.action_tx.send(UiAction::TakeScreenshot);
-                        }
-
                         ui.add_space(8.0);
-
-                        let open_shots_btn = ui.add(
-                            egui::Button::new(
-                                RichText::new(format!("{}  {}", M3Icon::FOLDER, t(TextKey::OpenScreenshotsFolder, lang)))
-                                    .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
-                                    .size(11.5),
-                            )
-                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
-                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
-                            .min_size(Vec2::new(150.0, 32.0)),
+                        ui.label(
+                            RichText::new(t(TextKey::DescTakeScreenshot, lang))
+                                .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                .size(11.5),
                         );
-                        if open_shots_btn.clicked() {
-                            let shot_dir = state.output_dir.join("Screenshots");
-                            let _ = std::fs::create_dir_all(&shot_dir);
-                            let _ = std::process::Command::new("explorer").arg(&shot_dir).spawn();
-                        }
-                    });
-                });
+
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            let shot_btn = ui.add(
+                                egui::Button::new(
+                                    RichText::new(format!("{}  {} (Alt+F1)", M3Icon::CAMERA, t(TextKey::ActionTakeScreenshot, lang)))
+                                        .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
+                                        .size(12.0)
+                                        .strong(),
+                                )
+                                .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
+                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                .min_size(Vec2::new(180.0, 32.0)),
+                            );
+                            if shot_btn.clicked() {
+                                let _ = self.action_tx.send(UiAction::TakeScreenshot);
+                            }
+
+                            ui.add_space(8.0);
+
+                            let open_shots_btn = ui.add(
+                                egui::Button::new(
+                                    RichText::new(format!("{}  {}", M3Icon::FOLDER, t(TextKey::OpenScreenshotsFolder, lang)))
+                                        .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                        .size(11.5),
+                                )
+                                .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                .min_size(Vec2::new(150.0, 32.0)),
+                            );
+                            if open_shots_btn.clicked() {
+                                let shot_dir = state.output_dir.join("Screenshots");
+                                let _ = std::fs::create_dir_all(&shot_dir);
+                                let _ = std::process::Command::new("explorer").arg(&shot_dir).spawn();
+                            }
+                        });
+                    },
+                );
             });
     }
 
@@ -1190,6 +1198,22 @@ impl OmniClipApp {
             &format!("{}  {}", M3Icon::VIDEO, t(TextKey::SectionResolution, lang)),
             Some(t(TextKey::SectionResolutionDesc, lang)),
             |ui| {
+                if !state.available_displays.is_empty() {
+                    self.render_row(ui, |ui| {
+                        ui.label(RichText::new(t(TextKey::DisplayTargetLabel, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                        for disp in &state.available_displays {
+                            let is_sel = state.selected_display_index == disp.index;
+                            let chip_label = format!("{} ({}x{}){}", disp.name, disp.width, disp.height, if disp.is_primary { " ★" } else { "" });
+                            if self.render_preset_chip(ui, &chip_label, is_sel) {
+                                self.state.write().selected_display_index = disp.index;
+                                let _ = self.action_tx.send(UiAction::SetDisplayIndex(disp.index));
+                            }
+                        }
+                    });
+
+                    ui.add_space(8.0);
+                }
+
                 self.render_row(ui, |ui| {
                     ui.label(RichText::new(t(TextKey::OutputResolution, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     let resolutions = [t(TextKey::PresetNative, lang), "1080p (FHD)", "1440p (2K)", "4K (UHD)", "3440x1440"];
@@ -1306,6 +1330,25 @@ impl OmniClipApp {
             &format!("{}  {}", M3Icon::LIGHTNING, t(TextKey::SectionEncoder, lang)),
             Some(t(TextKey::SectionEncoderDesc, lang)),
             |ui| {
+                self.render_row(ui, |ui| {
+                    ui.label(RichText::new(t(TextKey::VideoCodecLabel, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let codecs = [
+                        (crate::buffer::chunk::VideoCodec::H264, t(TextKey::VideoCodecH264, lang)),
+                        (crate::buffer::chunk::VideoCodec::Hevc, t(TextKey::VideoCodecHevc, lang)),
+                    ];
+                    for (codec, lbl) in codecs {
+                        let is_sel = state.video_codec == codec;
+                        if self.render_preset_chip(ui, lbl, is_sel) {
+                            self.state.write().video_codec = codec;
+                            let _ = self.action_tx.send(UiAction::SetVideoCodec(codec));
+                        }
+                    }
+                });
+
+                ui.add_space(4.0);
+                ui.label(RichText::new(t(TextKey::VideoCodecDesc, lang)).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
+                ui.add_space(8.0);
+
                 self.render_row(ui, |ui| {
                     ui.label(RichText::new(t(TextKey::EncoderPreset, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     let presets = [
@@ -1446,6 +1489,17 @@ impl OmniClipApp {
                     Some(t(TextKey::AutostartBufferDesc, lang)),
                 ) {
                     self.state.write().buffer_autostart = autostart;
+                }
+
+                ui.add_space(8.0);
+                let mut win_autostart = crate::platform::autostart::is_autostart_enabled();
+                if self.render_toggle_switch(
+                    ui,
+                    &mut win_autostart,
+                    t(TextKey::AutostartWindows, lang),
+                    Some(t(TextKey::AutostartWindowsDesc, lang)),
+                ) {
+                    let _ = crate::platform::autostart::set_autostart(win_autostart);
                 }
             },
         );
@@ -1944,6 +1998,19 @@ impl OmniClipApp {
         );
     }
 
+    /// Converts a Windows Virtual-Key code into a human-readable display string.
+    fn vk_to_string(vk: u32) -> String {
+        match vk {
+            0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
+            0x30..=0x39 => format!("{}", (vk as u8) as char),
+            0x41..=0x5A => format!("{}", (vk as u8) as char),
+            0x20 => "Space".to_string(),
+            0x09 => "Tab".to_string(),
+            0x1B => "Esc".to_string(),
+            _ => format!("0x{:X}", vk),
+        }
+    }
+
     /// Renders Tab 5: Hotkeys overview with keyboard keycaps design.
     fn render_tab_hotkeys(&self, ui: &mut egui::Ui, state: &UiState) {
         let lang = state.language;
@@ -1954,12 +2021,16 @@ impl OmniClipApp {
             |ui| {
                 let ptt_off = if lang == Language::Ru { "ВЫКЛ (Always On)" } else { "OFF (Always On)" };
                 let ptt_display = if state.mic_mode_ptt { &state.mic_ptt_key } else { ptt_off };
+                let replay_key = Self::vk_to_string(state.hotkey_replay_vk);
+                let record_key = Self::vk_to_string(state.hotkey_record_vk);
+                let overlay_key = Self::vk_to_string(state.hotkey_overlay_vk);
+                let screenshot_key = Self::vk_to_string(state.hotkey_screenshot_vk);
                 let hotkeys = [
-                    (t(TextKey::ActionSaveReplay, lang), "Alt", "F10", t(TextKey::DescSaveReplay, lang)),
-                    (t(TextKey::ActionToggleRecord, lang), "Alt", "F9", t(TextKey::DescToggleRecord, lang)),
-                    (t(TextKey::ActionToggleOverlay, lang), "Alt", "Z", t(TextKey::DescToggleOverlay, lang)),
+                    (t(TextKey::ActionSaveReplay, lang), "Alt", replay_key.as_str(), t(TextKey::DescSaveReplay, lang)),
+                    (t(TextKey::ActionToggleRecord, lang), "Alt", record_key.as_str(), t(TextKey::DescToggleRecord, lang)),
+                    (t(TextKey::ActionToggleOverlay, lang), "Alt", overlay_key.as_str(), t(TextKey::DescToggleOverlay, lang)),
                     (t(TextKey::HotkeysPtt, lang), ptt_display, "", t(TextKey::HotkeysPttDesc, lang)),
-                    (t(TextKey::ActionTakeScreenshot, lang), "Alt", "F1", t(TextKey::DescTakeScreenshot, lang)),
+                    (t(TextKey::ActionTakeScreenshot, lang), "Alt", screenshot_key.as_str(), t(TextKey::DescTakeScreenshot, lang)),
                     (t(TextKey::HotkeysEsc, lang), "Esc", "", t(TextKey::HotkeysEscDesc, lang)),
                 ];
 
@@ -2233,9 +2304,28 @@ impl OmniClipApp {
                                                 });
 
                                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                                let show_btn = ui.add(
+                                                let folder_btn = ui.add(
                                                     egui::Button::new(
-                                                        RichText::new(format!("{}  {}", M3Icon::OPEN_EXTERNAL, t(TextKey::Open, lang)))
+                                                        RichText::new(M3Icon::FOLDER)
+                                                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                                            .size(11.0),
+                                                    )
+                                                    .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
+                                                    .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                                    .min_size(Vec2::new(24.0, 22.0)),
+                                                )
+                                                .on_hover_text(t(TextKey::ShowInFolder, lang));
+                                                if folder_btn.clicked() {
+                                                    let _ = std::process::Command::new("explorer")
+                                                        .args(["/select,", &clip.filepath.to_string_lossy()])
+                                                        .spawn();
+                                                }
+
+                                                ui.add_space(4.0);
+
+                                                let play_btn = ui.add(
+                                                    egui::Button::new(
+                                                        RichText::new(format!("{}  {}", M3Icon::PLAY, t(TextKey::PlayClip, lang)))
                                                             .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
                                                             .size(11.0)
                                                             .strong(),
@@ -2244,9 +2334,9 @@ impl OmniClipApp {
                                                     .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
                                                     .min_size(Vec2::new(0.0, 22.0)),
                                                 );
-                                                if show_btn.clicked() {
+                                                if play_btn.clicked() {
                                                     let _ = std::process::Command::new("explorer")
-                                                        .args(["/select,", &clip.filepath.to_string_lossy()])
+                                                        .arg(&clip.filepath)
                                                         .spawn();
                                                 }
                                             });
@@ -2364,9 +2454,28 @@ impl OmniClipApp {
                                                 });
 
                                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                                let show_btn = ui.add(
+                                                let folder_btn = ui.add(
                                                     egui::Button::new(
-                                                        RichText::new(format!("{}  {}", M3Icon::OPEN_EXTERNAL, t(TextKey::Open, lang)))
+                                                        RichText::new(M3Icon::FOLDER)
+                                                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                                            .size(11.0),
+                                                    )
+                                                    .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
+                                                    .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                                    .min_size(Vec2::new(24.0, 22.0)),
+                                                )
+                                                .on_hover_text(t(TextKey::ShowInFolder, lang));
+                                                if folder_btn.clicked() {
+                                                    let _ = std::process::Command::new("explorer")
+                                                        .args(["/select,", &shot.filepath.to_string_lossy()])
+                                                        .spawn();
+                                                }
+
+                                                ui.add_space(4.0);
+
+                                                let view_btn = ui.add(
+                                                    egui::Button::new(
+                                                        RichText::new(format!("{}  {}", M3Icon::OPEN_EXTERNAL, t(TextKey::ViewScreenshot, lang)))
                                                             .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
                                                             .size(11.0)
                                                             .strong(),
@@ -2375,9 +2484,9 @@ impl OmniClipApp {
                                                     .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
                                                     .min_size(Vec2::new(0.0, 22.0)),
                                                 );
-                                                if show_btn.clicked() {
+                                                if view_btn.clicked() {
                                                     let _ = std::process::Command::new("explorer")
-                                                        .args(["/select,", &shot.filepath.to_string_lossy()])
+                                                        .arg(&shot.filepath)
                                                         .spawn();
                                                 }
                                             });

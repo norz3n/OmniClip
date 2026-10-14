@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_ALT, VK_F10};
+use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, MOD_ALT, VK_F1, VK_F9, VK_F10};
+use crate::buffer::chunk::VideoCodec;
 
 fn default_modifiers() -> HOT_KEY_MODIFIERS {
     MOD_ALT
@@ -9,6 +10,22 @@ fn default_modifiers() -> HOT_KEY_MODIFIERS {
 
 fn default_hotkey_vk() -> u32 {
     VK_F10.0 as u32
+}
+
+fn default_hotkey_overlay_vk() -> u32 {
+    0x5A // VK 'Z'
+}
+
+fn default_hotkey_record_vk() -> u32 {
+    VK_F9.0 as u32
+}
+
+fn default_hotkey_screenshot_vk() -> u32 {
+    VK_F1.0 as u32
+}
+
+fn default_video_codec() -> VideoCodec {
+    VideoCodec::H264
 }
 
 fn default_filename_pattern() -> String {
@@ -76,12 +93,24 @@ pub struct Config {
     /// Active UI language ("auto" | "ru" | "en").
     #[serde(default = "default_language")]
     pub language: String,
+    /// Video compression codec (H264 or Hevc).
+    #[serde(default = "default_video_codec")]
+    pub video_codec: VideoCodec,
     /// Hotkey modifier keys (e.g. Alt).
     #[serde(skip, default = "default_modifiers")]
     pub hotkey_modifiers: HOT_KEY_MODIFIERS,
-    /// Hotkey virtual key code (e.g. F10 = 0x79).
+    /// Hotkey virtual key code for replay clip (e.g. F10 = 0x79).
     #[serde(default = "default_hotkey_vk")]
     pub hotkey_vk: u32,
+    /// Hotkey virtual key code for overlay toggle (e.g. Z = 0x5A).
+    #[serde(default = "default_hotkey_overlay_vk")]
+    pub hotkey_overlay_vk: u32,
+    /// Hotkey virtual key code for manual record toggle (e.g. F9 = 0x78).
+    #[serde(default = "default_hotkey_record_vk")]
+    pub hotkey_record_vk: u32,
+    /// Hotkey virtual key code for screenshot capture (e.g. F1 = 0x70).
+    #[serde(default = "default_hotkey_screenshot_vk")]
+    pub hotkey_screenshot_vk: u32,
 }
 
 impl Config {
@@ -117,8 +146,12 @@ impl Default for Config {
             audio_multi_track: false,
             display_index: 0,
             language: default_language(),
+            video_codec: VideoCodec::H264,
             hotkey_modifiers: MOD_ALT,
             hotkey_vk: VK_F10.0 as u32,
+            hotkey_overlay_vk: 0x5A,
+            hotkey_record_vk: VK_F9.0 as u32,
+            hotkey_screenshot_vk: VK_F1.0 as u32,
         }
     }
 }

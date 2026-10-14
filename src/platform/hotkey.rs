@@ -7,7 +7,7 @@ use log::{info, warn};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT, VK_F1, VK_F9,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW,
@@ -19,9 +19,6 @@ const OMNICLIP_HOTKEY_REPLAY_ID: i32 = 0x4F43; // 'OC' (Alt+F10)
 const OMNICLIP_HOTKEY_OVERLAY_ID: i32 = 0x4F5A; // 'OZ' (Alt+Z)
 const OMNICLIP_HOTKEY_RECORD_ID: i32 = 0x4F52;  // 'OR' (Alt+F9)
 const OMNICLIP_HOTKEY_SCREENSHOT_ID: i32 = 0x4F53; // 'OS' (Alt+F1)
-
-/// Virtual key code for ASCII 'Z'.
-const VK_KEY_Z: u32 = 0x5A;
 
 /// Event emitted when a global hotkey is triggered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,7 +48,10 @@ impl HotkeyListener {
     /// * `sender`: Channel sender to notify when hotkey is pressed
     pub fn spawn(
         modifiers: HOT_KEY_MODIFIERS,
-        vk_code: u32,
+        replay_vk: u32,
+        overlay_vk: u32,
+        record_vk: u32,
+        screenshot_vk: u32,
         sender: Sender<HotkeyEvent>,
     ) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
@@ -73,7 +73,7 @@ impl HotkeyListener {
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_REPLAY_ID,
                         modifiers | MOD_NOREPEAT,
-                        vk_code,
+                        replay_vk,
                     )
                 };
 
@@ -82,33 +82,33 @@ impl HotkeyListener {
                     return;
                 }
 
-                // Register global hotkey for overlay toggle (Alt+Z)
+                // Register global hotkey for overlay toggle (Alt+Z default)
                 let _ = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_OVERLAY_ID,
-                        MOD_ALT | MOD_NOREPEAT,
-                        VK_KEY_Z,
+                        modifiers | MOD_NOREPEAT,
+                        overlay_vk,
                     )
                 };
 
-                // Register global hotkey for manual record toggle (Alt+F9)
+                // Register global hotkey for manual record toggle (Alt+F9 default)
                 let _ = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_RECORD_ID,
-                        MOD_ALT | MOD_NOREPEAT,
-                        VK_F9.0 as u32,
+                        modifiers | MOD_NOREPEAT,
+                        record_vk,
                     )
                 };
 
-                // Register global hotkey for screenshot capture (Alt+F1)
+                // Register global hotkey for screenshot capture (Alt+F1 default)
                 let _ = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_SCREENSHOT_ID,
-                        MOD_ALT | MOD_NOREPEAT,
-                        VK_F1.0 as u32,
+                        modifiers | MOD_NOREPEAT,
+                        screenshot_vk,
                     )
                 };
 

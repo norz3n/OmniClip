@@ -2,7 +2,7 @@ pub mod d3d11_device;
 pub mod dxgi_duplicator;
 
 pub use d3d11_device::D3D11Context;
-pub use dxgi_duplicator::{CaptureStatus, DxgiDuplicator};
+pub use dxgi_duplicator::{CaptureStatus, DisplayInfo, DxgiDuplicator};
 
 use std::path::Path;
 use anyhow::{anyhow, Result};

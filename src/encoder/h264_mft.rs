@@ -31,10 +31,11 @@ pub struct H264Encoder {
     provides_samples: bool,
     /// Number of ProcessInput calls the async MFT currently accepts.
     need_input_credits: u32,
+    codec: crate::buffer::chunk::VideoCodec,
 }
 
 impl H264Encoder {
-    /// Initializes a new hardware H.264 encoder transform with the given parameters and DXGI device manager.
+    /// Initializes a new hardware video encoder transform with the given parameters and DXGI device manager.
     pub fn new(
         dxgi_device_mgr: &DxgiDeviceManager,
         width: u32,
@@ -42,10 +43,17 @@ impl H264Encoder {
         fps: u32,
         bitrate: u32,
         gop_size: u32,
+        codec: crate::buffer::chunk::VideoCodec,
     ) -> Result<Self> {
-        let out_type_info = MFT_REGISTER_TYPE_INFO {
+        let requested_subtype = match codec {
+            crate::buffer::chunk::VideoCodec::H264 => MFVideoFormat_H264,
+            crate::buffer::chunk::VideoCodec::Hevc => MFVideoFormat_HEVC,
+        };
+
+        let mut actual_codec = codec;
+        let mut out_type_info = MFT_REGISTER_TYPE_INFO {
             guidMajorType: MFMediaType_Video,
-            guidSubtype: MFVideoFormat_H264,
+            guidSubtype: requested_subtype,
         };
 
         let flags = MFT_ENUM_FLAG_HARDWARE
@@ -68,6 +76,24 @@ impl H264Encoder {
         };
 
         if enum_res.is_err() || num_activates == 0 {
+            if codec == crate::buffer::chunk::VideoCodec::Hevc {
+                log::warn!("Hardware HEVC MFT encoder not found, falling back to H.264");
+                actual_codec = crate::buffer::chunk::VideoCodec::H264;
+                out_type_info.guidSubtype = MFVideoFormat_H264;
+                let _ = unsafe {
+                    MFTEnumEx(
+                        MFT_CATEGORY_VIDEO_ENCODER,
+                        flags,
+                        None,
+                        Some(&out_type_info),
+                        &mut activates_ptr,
+                        &mut num_activates,
+                    )
+                };
+            }
+        }
+
+        if num_activates == 0 || activates_ptr.is_null() {
             // Fallback to all encoders
             unsafe {
                 MFTEnumEx(
@@ -78,12 +104,12 @@ impl H264Encoder {
                     &mut activates_ptr,
                     &mut num_activates,
                 )
-                .map_err(|e| anyhow!("Failed to enumerate any H.264 MFT encoder: {}", e))?;
+                .map_err(|e| anyhow!("Failed to enumerate any video MFT encoder: {}", e))?;
             }
         }
 
         if num_activates == 0 || activates_ptr.is_null() {
-            return Err(anyhow!("No H.264 MFT encoder found on system"));
+            return Err(anyhow!("No video MFT encoder found on system"));
         }
 
         let act_slice = unsafe { std::slice::from_raw_parts(activates_ptr, num_activates as usize) };
@@ -94,7 +120,7 @@ impl H264Encoder {
         let transform: IMFTransform = unsafe {
             activate
                 .ActivateObject()
-                .map_err(|e| anyhow!("Failed to activate H.264 transform: {}", e))?
+                .map_err(|e| anyhow!("Failed to activate video transform: {}", e))?
         };
 
         unsafe {
@@ -122,11 +148,16 @@ impl H264Encoder {
             }
         }
 
-        // Configure Output Media Type (H.264)
+        let actual_subtype = match actual_codec {
+            crate::buffer::chunk::VideoCodec::H264 => MFVideoFormat_H264,
+            crate::buffer::chunk::VideoCodec::Hevc => MFVideoFormat_HEVC,
+        };
+
+        // Configure Output Media Type (H.264 / HEVC)
         unsafe {
             let out_type: IMFMediaType = MFCreateMediaType()?;
             out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            out_type.SetGUID(&MF_MT_SUBTYPE, &actual_subtype)?;
             out_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
             out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(width, height))?;
             out_type.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(fps, 1))?;
@@ -185,10 +216,17 @@ impl H264Encoder {
             fps,
             bitrate,
             gop_size,
+            codec: actual_codec,
             stream_info,
             provides_samples,
             need_input_credits: 0,
         })
+    }
+
+    /// Returns the active compression codec (H.264 or HEVC).
+    #[inline]
+    pub fn codec(&self) -> crate::buffer::chunk::VideoCodec {
+        self.codec
     }
 
     /// Encoded frame width in pixels.
@@ -475,7 +513,7 @@ mod tests {
         let _guard = MfPlatformGuard::init().expect("MF init failed");
         let d3d = D3D11Context::new().expect("D3D11 init failed");
         let dev_mgr = DxgiDeviceManager::new(d3d.device()).expect("DxgiDeviceManager failed");
-        let mut enc = H264Encoder::new(&dev_mgr, 1920, 1080, 60, 20_000_000, 60).expect("Encoder init failed");
+        let mut enc = H264Encoder::new(&dev_mgr, 1920, 1080, 60, 20_000_000, 60, crate::buffer::chunk::VideoCodec::H264).expect("Encoder init failed");
 
         use windows::Win32::Graphics::Direct3D11::*;
         use windows::Win32::Graphics::Dxgi::Common::*;

@@ -42,6 +42,19 @@ impl AudioChunk {
     }
 }
 
+/// Supported video compression codecs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum VideoCodec {
+    H264,
+    Hevc,
+}
+
+impl Default for VideoCodec {
+    fn default() -> Self {
+        Self::H264
+    }
+}
+
 /// An immutable point-in-time snapshot of the circular buffer ready for disk dumping.
 #[derive(Debug, Clone)]
 pub struct RingBufferSnapshot {
@@ -55,6 +68,8 @@ pub struct RingBufferSnapshot {
     pub height: u32,
     /// Video frame rate.
     pub fps: u32,
+    /// Video compression codec used for video packets.
+    pub codec: VideoCodec,
     /// Audio sample rate in Hz.
     pub audio_sample_rate: u32,
     /// Audio channel count.

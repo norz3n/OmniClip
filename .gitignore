@@ -16,3 +16,6 @@ Thumbs.db
 
 # Agent workspace (local only)
 .agents/
+
+# Distribution packages
+dist/

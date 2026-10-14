@@ -52,11 +52,15 @@ impl Mp4Muxer {
                 .map_err(|e| anyhow!("Failed to create SinkWriter for '{}': {}", path_str, e))?
         };
 
-        // Configure Video Stream (H.264 Passthrough)
+        // Configure Video Stream (H.264 or HEVC Passthrough)
         let vid_type: IMFMediaType = unsafe { MFCreateMediaType()? };
+        let vid_subtype = match snapshot.codec {
+            crate::buffer::chunk::VideoCodec::H264 => &MFVideoFormat_H264,
+            crate::buffer::chunk::VideoCodec::Hevc => &MFVideoFormat_HEVC,
+        };
         unsafe {
             vid_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            vid_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            vid_type.SetGUID(&MF_MT_SUBTYPE, vid_subtype)?;
             vid_type.SetUINT32(&MF_MT_AVG_BITRATE, 35_000_000)?;
             vid_type.SetUINT64(&MF_MT_FRAME_SIZE, pack_u64(snapshot.width, snapshot.height))?;
             vid_type.SetUINT64(&MF_MT_FRAME_RATE, pack_u64(snapshot.fps, 1))?;

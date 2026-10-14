@@ -212,6 +212,20 @@ pub struct UiState {
     toast_id_counter: u64,
     /// Active UI language (Russian or English).
     pub language: crate::ui::i18n::Language,
+    /// Hardware video compression codec (H.264 or HEVC).
+    pub video_codec: crate::buffer::chunk::VideoCodec,
+    /// Currently selected display monitor index.
+    pub selected_display_index: u32,
+    /// Available displays enumerated by DXGI.
+    pub available_displays: Vec<crate::capture::DisplayInfo>,
+    /// Hotkey virtual key code for replay clip (e.g. F10 = 0x79).
+    pub hotkey_replay_vk: u32,
+    /// Hotkey virtual key code for overlay toggle (e.g. Z = 0x5A).
+    pub hotkey_overlay_vk: u32,
+    /// Hotkey virtual key code for manual record toggle (e.g. F9 = 0x78).
+    pub hotkey_record_vk: u32,
+    /// Hotkey virtual key code for screenshot capture (e.g. F1 = 0x70).
+    pub hotkey_screenshot_vk: u32,
 }
 
 impl UiState {
@@ -281,6 +295,13 @@ impl UiState {
             active_toast: None,
             toast_id_counter: 0,
             language,
+            video_codec: crate::buffer::chunk::VideoCodec::H264,
+            selected_display_index: 0,
+            available_displays: Vec::new(),
+            hotkey_replay_vk: windows::Win32::UI::Input::KeyboardAndMouse::VK_F10.0 as u32,
+            hotkey_overlay_vk: 0x5A,
+            hotkey_record_vk: windows::Win32::UI::Input::KeyboardAndMouse::VK_F9.0 as u32,
+            hotkey_screenshot_vk: windows::Win32::UI::Input::KeyboardAndMouse::VK_F1.0 as u32,
         }
     }
 
