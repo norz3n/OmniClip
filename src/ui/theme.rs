@@ -291,6 +291,8 @@ impl M3Icon {
     pub const MUTE: &'static str = "\u{E74F}";
     /// Settings gear icon (U+E713).
     pub const SETTINGS: &'static str = "\u{E713}";
+    /// Globe / Language & Locale icon (U+E774).
+    pub const GLOBE: &'static str = "\u{E774}";
 }
 
 #[cfg(test)]

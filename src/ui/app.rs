@@ -409,33 +409,80 @@ impl OmniClipApp {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
 
-                ui.add_space(4.0);
+                ui.add_space(8.0);
 
-                // Language switcher chip (RU / EN)
+                // Modern Material 3 Segmented Language Switcher (🌐 RU | EN)
                 let current_lang = state.language;
-                let next_lang = match current_lang {
-                    Language::Ru => Language::En,
-                    Language::En => Language::Ru,
-                };
-                let lang_label = match current_lang {
-                    Language::Ru => "🇷🇺 RU",
-                    Language::En => "🇬🇧 EN",
-                };
-                let lang_btn = ui.add(
-                    egui::Button::new(
-                        RichText::new(lang_label)
-                            .color(M3Theme::EGUI_ON_SURFACE)
-                            .size(11.0)
-                            .strong(),
-                    )
+                let is_ru = current_lang == Language::Ru;
+                let is_en = current_lang == Language::En;
+
+                egui::Frame::NONE
                     .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
-                    .corner_radius(CornerRadius::same(M3Theme::RADIUS_SM_U8))
-                    .min_size(Vec2::new(48.0, 28.0)),
-                );
-                if lang_btn.clicked() {
-                    self.state.write().set_language(next_lang);
-                    let _ = self.action_tx.send(UiAction::SetLanguage(next_lang.code().to_string()));
-                }
+                    .stroke(egui::Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
+                    .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                    .inner_margin(egui::vec2(6.0, 3.0))
+                    .show(ui, |ui| {
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(2.0, 0.0);
+
+                            ui.label(
+                                RichText::new(M3Icon::GLOBE)
+                                    .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                    .size(11.5),
+                            );
+                            ui.add_space(2.0);
+
+                            let ru_btn = ui.add(
+                                egui::Button::new(
+                                    RichText::new("RU")
+                                        .color(if is_ru {
+                                            M3Theme::EGUI_ON_PRIMARY
+                                        } else {
+                                            M3Theme::EGUI_ON_SURFACE_VARIANT
+                                        })
+                                        .size(11.0)
+                                        .strong(),
+                                )
+                                .fill(if is_ru {
+                                    M3Theme::EGUI_PRIMARY
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                .min_size(Vec2::new(26.0, 20.0)),
+                            )
+                            .on_hover_text("Русский");
+                            if ru_btn.clicked() && !is_ru {
+                                self.state.write().set_language(Language::Ru);
+                                let _ = self.action_tx.send(UiAction::SetLanguage("ru".to_string()));
+                            }
+
+                            let en_btn = ui.add(
+                                egui::Button::new(
+                                    RichText::new("EN")
+                                        .color(if is_en {
+                                            M3Theme::EGUI_ON_PRIMARY
+                                        } else {
+                                            M3Theme::EGUI_ON_SURFACE_VARIANT
+                                        })
+                                        .size(11.0)
+                                        .strong(),
+                                )
+                                .fill(if is_en {
+                                    M3Theme::EGUI_PRIMARY
+                                } else {
+                                    Color32::TRANSPARENT
+                                })
+                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                .min_size(Vec2::new(26.0, 20.0)),
+                            )
+                            .on_hover_text("English");
+                            if en_btn.clicked() && !is_en {
+                                self.state.write().set_language(Language::En);
+                                let _ = self.action_tx.send(UiAction::SetLanguage("en".to_string()));
+                            }
+                        });
+                    });
             });
         });
     }
