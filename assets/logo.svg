@@ -1,29 +1,29 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
   <defs>
-    <!-- Deep Minimal Dark Background -->
+    <!-- Material 3 Surface Container Gradient (#1E2025 -> #111318) -->
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#151722"/>
-      <stop offset="100%" stop-color="#0A0B10"/>
+      <stop offset="0%" stop-color="#1E2025"/>
+      <stop offset="100%" stop-color="#111318"/>
     </linearGradient>
 
-    <!-- Electric Cyan-Blue Gradient for the Buffer Arc -->
+    <!-- Material 3 Omni Buffer Arc Gradient: Primary Container (#264483) -> Omni Seed (#4C6BFF) -> Primary Accent (#ADC6FF) -->
     <linearGradient id="arcGrad" x1="0%" y1="100%" x2="100%" y2="0%">
-      <stop offset="0%" stop-color="#2563EB"/>
-      <stop offset="60%" stop-color="#38BDF8"/>
-      <stop offset="100%" stop-color="#93C5FD"/>
+      <stop offset="0%" stop-color="#264483"/>
+      <stop offset="50%" stop-color="#4C6BFF"/>
+      <stop offset="100%" stop-color="#ADC6FF"/>
     </linearGradient>
 
-    <!-- Clean Crisp Play Triangle Gradient -->
+    <!-- Material 3 Play Core Gradient: Pure White -> On Primary Container (#D8E2FF) -->
     <linearGradient id="playGrad" x1="0%" y1="0%" x2="100%" y2="100%">
       <stop offset="0%" stop-color="#FFFFFF"/>
-      <stop offset="100%" stop-color="#D6E4FF"/>
+      <stop offset="100%" stop-color="#D8E2FF"/>
     </linearGradient>
   </defs>
 
-  <!-- 1. Minimal Squircle Tile -->
-  <rect x="32" y="32" width="448" height="448" rx="116" fill="url(#bg)" stroke="#1F2332" stroke-width="2"/>
+  <!-- 1. Minimal Squircle Tile with M3 Outline Variant (#44474E) -->
+  <rect x="32" y="32" width="448" height="448" rx="116" fill="url(#bg)" stroke="#44474E" stroke-width="2"/>
 
-  <!-- 2. "Omni" Rolling Buffer Loop (Single, Bold, Continuous Minimal Arc) -->
+  <!-- 2. "Omni" Rolling Buffer Loop (Continuous Minimal Arc in M3 Palette) -->
   <path d="M 358,358 
            A 144,144 0 1,1 254,112"
         fill="none"
@@ -31,7 +31,7 @@
         stroke-width="26"
         stroke-linecap="round"/>
 
-  <!-- Seamless Integrated Arrowhead (Continuous with the Arc Motion) -->
+  <!-- Seamless Integrated Arrowhead in M3 Primary (#ADC6FF) -->
   <path d="M 248,88 
            C 248,84 253,82 257,85 
            L 294,108 
@@ -39,7 +39,7 @@
            L 257,143 
            C 253,146 248,144 248,140 
            Z"
-        fill="#93C5FD"/>
+        fill="#ADC6FF"/>
 
   <!-- 3. "Clip" Core (Pure, Optically Centered Rounded Play Geometry) -->
   <path d="M 226,186
