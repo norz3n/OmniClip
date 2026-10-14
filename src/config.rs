@@ -19,6 +19,28 @@ fn default_display_index() -> u32 {
     0
 }
 
+fn default_language() -> String {
+    "auto".to_string()
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetUserDefaultUILanguage() -> u16;
+}
+
+/// Detects the default UI language of the Windows operating system.
+///
+/// Returns `"ru"` for Russian, Ukrainian, Belarusian, or Kazakh system locales;
+/// returns `"en"` for all other languages.
+pub fn detect_system_language() -> &'static str {
+    let langid = unsafe { GetUserDefaultUILanguage() };
+    let primary_lang = langid & 0x03FF;
+    match primary_lang {
+        0x19 | 0x22 | 0x23 | 0x3F => "ru",
+        _ => "en",
+    }
+}
+
 /// Global configuration for OmniClip.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -51,12 +73,26 @@ pub struct Config {
     /// Display index to capture (0 = primary monitor).
     #[serde(default = "default_display_index")]
     pub display_index: u32,
+    /// Active UI language ("auto" | "ru" | "en").
+    #[serde(default = "default_language")]
+    pub language: String,
     /// Hotkey modifier keys (e.g. Alt).
     #[serde(skip, default = "default_modifiers")]
     pub hotkey_modifiers: HOT_KEY_MODIFIERS,
     /// Hotkey virtual key code (e.g. F10 = 0x79).
     #[serde(default = "default_hotkey_vk")]
     pub hotkey_vk: u32,
+}
+
+impl Config {
+    /// Resolves the concrete language code ("ru" or "en") considering the "auto" setting.
+    pub fn resolved_language(&self) -> &'static str {
+        match self.language.trim().to_ascii_lowercase().as_str() {
+            "ru" => "ru",
+            "en" => "en",
+            _ => detect_system_language(),
+        }
+    }
 }
 
 impl Default for Config {
@@ -80,6 +116,7 @@ impl Default for Config {
             filename_pattern: default_filename_pattern(),
             audio_multi_track: false,
             display_index: 0,
+            language: default_language(),
             hotkey_modifiers: MOD_ALT,
             hotkey_vk: VK_F10.0 as u32,
         }

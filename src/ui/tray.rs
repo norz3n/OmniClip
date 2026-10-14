@@ -18,6 +18,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::ui::app::UiAction;
+use crate::ui::i18n::{t, Language, TextKey};
+use crate::ui::state::SharedUiState;
 
 /// Tray message ID sent back to the window proc.
 pub const WM_APP_TRAY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
@@ -71,16 +73,20 @@ impl TrayIcon {
     }
 
     /// Displays the right-click context menu and returns the selected command ID.
-    pub fn show_context_menu(&self) -> Option<u32> {
+    pub fn show_context_menu(&self, lang: Language) -> Option<u32> {
         unsafe {
             let hmenu = CreatePopupMenu().ok()?;
             let mut pt = POINT::default();
             let _ = GetCursorPos(&mut pt);
 
             // Populate menu items
-            let s_overlay: Vec<u16> = "Открыть оверлей (Alt+Z)\0".encode_utf16().collect();
-            let s_save: Vec<u16> = "Сохранить повтор (Alt+F10)\0".encode_utf16().collect();
-            let s_exit: Vec<u16> = "Выход\0".encode_utf16().collect();
+            let s_overlay_str = format!("{}\0", t(TextKey::TrayOpenOverlay, lang));
+            let s_save_str = format!("{}\0", t(TextKey::TraySaveReplay, lang));
+            let s_exit_str = format!("{}\0", t(TextKey::TrayExit, lang));
+
+            let s_overlay: Vec<u16> = s_overlay_str.encode_utf16().collect();
+            let s_save: Vec<u16> = s_save_str.encode_utf16().collect();
+            let s_exit: Vec<u16> = s_exit_str.encode_utf16().collect();
 
             let _ = AppendMenuW(hmenu, MF_STRING, TRAY_CMD_TOGGLE_OVERLAY as usize, windows::core::PCWSTR(s_overlay.as_ptr()));
             let _ = AppendMenuW(hmenu, MF_STRING, TRAY_CMD_SAVE_REPLAY as usize, windows::core::PCWSTR(s_save.as_ptr()));
@@ -136,6 +142,7 @@ impl Drop for TrayIcon {
 struct TrayContext {
     action_tx: Sender<UiAction>,
     egui_ctx: Arc<parking_lot::Mutex<Option<eframe::egui::Context>>>,
+    ui_state: Option<SharedUiState>,
     running: Arc<AtomicBool>,
     tray_icon: Option<TrayIcon>,
 }
@@ -165,8 +172,13 @@ unsafe extern "system" fn tray_wnd_proc(
             } else if event == WM_RBUTTONUP {
                 let mut action_to_send = None;
                 if let Some(ctx_guard) = TRAY_CTX.read().as_ref() {
+                    let lang = ctx_guard
+                        .ui_state
+                        .as_ref()
+                        .map(|s| s.read().language)
+                        .unwrap_or_default();
                     if let Some(ref tray) = ctx_guard.tray_icon {
-                        if let Some(cmd) = tray.show_context_menu() {
+                        if let Some(cmd) = tray.show_context_menu(lang) {
                             match cmd {
                                 TRAY_CMD_TOGGLE_OVERLAY => {
                                     let is_now_visible = crate::ui::toggle_overlay_visible();
@@ -223,6 +235,7 @@ impl TrayManager {
     pub fn spawn(
         action_tx: Sender<UiAction>,
         egui_ctx: Arc<parking_lot::Mutex<Option<eframe::egui::Context>>>,
+        ui_state: Option<SharedUiState>,
         running: Arc<AtomicBool>,
     ) -> Result<Self> {
         let (init_tx, init_rx) = crossbeam_channel::bounded::<Result<u32>>(1);
@@ -278,6 +291,7 @@ impl TrayManager {
                 *TRAY_CTX.write() = Some(TrayContext {
                     action_tx,
                     egui_ctx,
+                    ui_state,
                     running: running.clone(),
                     tray_icon: Some(tray_icon),
                 });

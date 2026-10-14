@@ -7,6 +7,7 @@ use eframe::egui::{self, Align, Color32, CornerRadius, Layout, RichText, Stroke,
 
 use crate::platform::hotkey::HotkeyEvent;
 use crate::ui::state::{HubTab, SharedUiState, UiState};
+use crate::ui::i18n::{t, Language, TextKey};
 use crate::ui::theme::{M3Icon, M3Theme};
 
 /// User action requested from the UI back to the core capture and encoding engine.
@@ -34,6 +35,8 @@ pub enum UiAction {
     SetAudioMultiTrack(bool),
     /// Capture instant screenshot to disk (Alt+F1).
     TakeScreenshot,
+    /// Change application display language ("auto", "ru", "en").
+    SetLanguage(String),
     /// Request clean application shutdown.
     QuitApplication,
 }
@@ -230,7 +233,8 @@ impl eframe::App for OmniClipApp {
         // 1. Drain replay save notifications from disk writer
         while let Ok((saved_path, duration_secs, size_mb)) = self.save_notify_rx.try_recv() {
             let mut st = self.state.write();
-            st.push_toast("Повтор сохранен", saved_path, duration_secs, size_mb);
+            let toast_title = t(TextKey::ToastReplaySaved, st.language);
+            st.push_toast(toast_title, saved_path, duration_secs, size_mb);
             st.is_saving_disk = false;
         }
 
@@ -278,7 +282,7 @@ impl eframe::App for OmniClipApp {
                 // Toast notification banner if a replay was just saved
                 if let Some(toast) = &state_snapshot.active_toast {
                     ui.add_space(8.0);
-                    self.render_toast_banner(ui, toast);
+                    self.render_toast_banner(ui, toast, state_snapshot.language);
                 }
 
                 ui.add_space(10.0);
@@ -329,9 +333,9 @@ impl OmniClipApp {
             let (status_color, status_text) = if state.manual_record_active {
                 let text = if let Some(start) = state.manual_record_start {
                     let s = start.elapsed().as_secs();
-                    format!("ЗАПИСЬ {:02}:{:02}", s / 60, s % 60)
+                    format!("{} {:02}:{:02}", t(TextKey::StatusRecording, state.language), s / 60, s % 60)
                 } else {
-                    "ЗАПИСЬ".to_string()
+                    t(TextKey::StatusRecording, state.language).to_string()
                 };
                 (
                     Color32::from_rgba_premultiplied(255, 82, 82, pulse_alpha),
@@ -340,10 +344,10 @@ impl OmniClipApp {
             } else if state.replay_buffer_active {
                 (
                     Color32::from_rgba_premultiplied(76, 175, 80, pulse_alpha),
-                    "БУФЕР АКТИВЕН".to_string(),
+                    t(TextKey::BufferActive, state.language).to_string(),
                 )
             } else {
-                (M3Theme::EGUI_OUTLINE, "ОЖИДАНИЕ".to_string())
+                (M3Theme::EGUI_OUTLINE, t(TextKey::StatusIdle, state.language).to_string())
             };
 
             // Real smooth anti-aliased glowing LED circle
@@ -388,7 +392,7 @@ impl OmniClipApp {
                     );
                 });
 
-            // Right-aligned close button using native vector close glyph
+            // Right-aligned close button and language toggle
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let close_btn = ui.add(
                     egui::Button::new(
@@ -404,19 +408,48 @@ impl OmniClipApp {
                     crate::ui::set_overlay_visible(false);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
                 }
+
+                ui.add_space(4.0);
+
+                // Language switcher chip (RU / EN)
+                let current_lang = state.language;
+                let next_lang = match current_lang {
+                    Language::Ru => Language::En,
+                    Language::En => Language::Ru,
+                };
+                let lang_label = match current_lang {
+                    Language::Ru => "🇷🇺 RU",
+                    Language::En => "🇬🇧 EN",
+                };
+                let lang_btn = ui.add(
+                    egui::Button::new(
+                        RichText::new(lang_label)
+                            .color(M3Theme::EGUI_ON_SURFACE)
+                            .size(11.0)
+                            .strong(),
+                    )
+                    .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                    .corner_radius(CornerRadius::same(M3Theme::RADIUS_SM_U8))
+                    .min_size(Vec2::new(48.0, 28.0)),
+                );
+                if lang_btn.clicked() {
+                    self.state.write().set_language(next_lang);
+                    let _ = self.action_tx.send(UiAction::SetLanguage(next_lang.code().to_string()));
+                }
             });
         });
     }
 
     /// Renders Material Design 3 Navigation Pill tabs using crisp vector glyphs.
     fn render_nav_tabs(&mut self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
         let tabs = [
-            (HubTab::Dashboard, format!("{}  Хаб", M3Icon::LIGHTNING)),
-            (HubTab::Video, format!("{}  Видео", M3Icon::VIDEO)),
-            (HubTab::Buffer, format!("{}  Буфер", M3Icon::STOPWATCH)),
-            (HubTab::Audio, format!("{}  Звук", M3Icon::AUDIO)),
-            (HubTab::Hotkeys, format!("{}  Хоткеи", M3Icon::KEYBOARD)),
-            (HubTab::Storage, format!("{}  Вывод", M3Icon::FOLDER)),
+            (HubTab::Dashboard, format!("{}  {}", M3Icon::LIGHTNING, t(TextKey::TabDashboard, lang))),
+            (HubTab::Video, format!("{}  {}", M3Icon::VIDEO, t(TextKey::TabVideo, lang))),
+            (HubTab::Buffer, format!("{}  {}", M3Icon::STOPWATCH, t(TextKey::TabBuffer, lang))),
+            (HubTab::Audio, format!("{}  {}", M3Icon::AUDIO, t(TextKey::TabAudio, lang))),
+            (HubTab::Hotkeys, format!("{}  {}", M3Icon::KEYBOARD, t(TextKey::TabHotkeys, lang))),
+            (HubTab::Storage, format!("{}  {}", M3Icon::FOLDER, t(TextKey::TabStorage, lang))),
         ];
 
         ui.horizontal(|ui| {
@@ -459,7 +492,7 @@ impl OmniClipApp {
     }
 
     /// Renders an active toast notification banner when a replay has been saved.
-    fn render_toast_banner(&self, ui: &mut egui::Ui, toast: &crate::ui::state::ToastNotification) {
+    fn render_toast_banner(&self, ui: &mut egui::Ui, toast: &crate::ui::state::ToastNotification, lang: Language) {
         let banner_w = ui.available_width();
         let inner_w = (banner_w - 28.0).max(10.0);
         egui::Frame::NONE
@@ -502,6 +535,14 @@ impl OmniClipApp {
                         );
                         ui.add_space(8.0);
 
+                        let sec_unit = match lang {
+                            Language::Ru => "с",
+                            Language::En => "s",
+                        };
+                        let mb_unit = match lang {
+                            Language::Ru => "МБ",
+                            Language::En => "MB",
+                        };
                         egui::Frame::NONE
                             .fill(M3Theme::EGUI_SURFACE_CONTAINER)
                             .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
@@ -509,7 +550,7 @@ impl OmniClipApp {
                             .inner_margin(egui::vec2(8.0, 3.0))
                             .show(ui, |ui| {
                                 ui.label(
-                                    RichText::new(format!("{}с · {:.1} МБ", toast.duration_secs, toast.size_mb))
+                                    RichText::new(format!("{}{sec_unit} · {:.1} {mb_unit}", toast.duration_secs, toast.size_mb))
                                         .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                                         .size(11.0),
                                 );
@@ -518,7 +559,7 @@ impl OmniClipApp {
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             let reveal_btn = ui.add(
                                 egui::Button::new(
-                                    RichText::new(format!("{}  Показать в папке", M3Icon::OPEN_EXTERNAL))
+                                    RichText::new(format!("{}  {}", M3Icon::OPEN_EXTERNAL, t(TextKey::ShowInFolder, lang)))
                                         .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
                                         .size(11.5)
                                         .strong(),
@@ -757,6 +798,11 @@ impl OmniClipApp {
 
     /// Renders Tab 1: Dashboard / Main Action Hub.
     fn render_tab_dashboard(&self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
+        let s_unit = match lang { Language::Ru => "с", Language::En => "s" };
+        let m_unit = match lang { Language::Ru => "м", Language::En => "m" };
+        let mb_unit = match lang { Language::Ru => "МБ", Language::En => "MB" };
+
         ui.columns(2, |columns| {
             // Column 1: Instant Replay Card
             egui::Frame::NONE
@@ -767,13 +813,17 @@ impl OmniClipApp {
                 .show(&mut columns[0], |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("МГНОВЕННЫЙ ПОВТОР")
+                            RichText::new(t(TextKey::InstantReplayTitle, lang))
                                 .color(M3Theme::EGUI_ON_SURFACE)
                                 .size(15.5)
                                 .strong(),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let chip_txt = if state.replay_buffer_active { "ВКЛ" } else { "ВЫКЛ" };
+                            let chip_txt = if state.replay_buffer_active {
+                                t(TextKey::StatusBufferOn, lang)
+                            } else {
+                                t(TextKey::StatusBufferOff, lang)
+                            };
                             let chip_col = if state.replay_buffer_active {
                                 M3Theme::EGUI_STATUS_GREEN
                             } else {
@@ -784,7 +834,7 @@ impl OmniClipApp {
                     });
 
                     ui.label(
-                        RichText::new("Фоновый циклический буфер в оперативной памяти (0% износа SSD)")
+                        RichText::new(t(TextKey::InstantReplayDesc, lang))
                             .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                             .size(11.5),
                     );
@@ -796,13 +846,13 @@ impl OmniClipApp {
                         (
                             M3Theme::EGUI_SURFACE_CONTAINER_HIGH,
                             M3Theme::EGUI_PRIMARY,
-                            format!("{}  Сохранение повтора...", M3Icon::STOPWATCH),
+                            format!("{}  {}", M3Icon::STOPWATCH, t(TextKey::SavingReplay, lang)),
                         )
                     } else {
                         (
                             M3Theme::EGUI_PRIMARY,
                             M3Theme::EGUI_ON_PRIMARY,
-                            format!("{}  Сохранить повтор (Alt+F10)", M3Icon::SAVE),
+                            format!("{}  {}", M3Icon::SAVE, t(TextKey::SaveReplay, lang)),
                         )
                     };
 
@@ -821,7 +871,7 @@ impl OmniClipApp {
                     ui.add_space(14.0);
 
                     ui.label(
-                        RichText::new("Длительность буфера:")
+                        RichText::new(t(TextKey::BufferDurationLabel, lang))
                             .color(M3Theme::EGUI_ON_SURFACE)
                             .size(12.5),
                     );
@@ -833,15 +883,15 @@ impl OmniClipApp {
                         for secs in durations {
                             let is_sel = state.buffer_duration_secs == secs;
                             let text = match secs {
-                                15 => "15с",
-                                30 => "30с",
-                                60 => "60с",
-                                120 => "2м",
-                                300 => "5м",
-                                _ => "??",
+                                15 => format!("15{s_unit}"),
+                                30 => format!("30{s_unit}"),
+                                60 => format!("60{s_unit}"),
+                                120 => format!("2{m_unit}"),
+                                300 => format!("5{m_unit}"),
+                                _ => "??".to_string(),
                             };
 
-                            if self.render_preset_chip(ui, text, is_sel) {
+                            if self.render_preset_chip(ui, &text, is_sel) {
                                 self.state.write().set_buffer_duration(secs);
                                 let _ = self.action_tx.send(UiAction::SetBufferDuration(secs));
                             }
@@ -849,13 +899,20 @@ impl OmniClipApp {
                     });
 
                     ui.add_space(12.0);
-                    ui.label(
-                        RichText::new(format!(
+                    let ram_info = match lang {
+                        Language::Ru => format!(
                             "Потребление ОЗУ: ~{} МБ ({} сек @ {} Mbps)",
                             state.estimated_ram_mb, state.buffer_duration_secs, state.video_bitrate_mbps
-                        ))
-                        .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
-                        .size(11.5),
+                        ),
+                        Language::En => format!(
+                            "RAM Consumption: ~{} MB ({} sec @ {} Mbps)",
+                            state.estimated_ram_mb, state.buffer_duration_secs, state.video_bitrate_mbps
+                        ),
+                    };
+                    ui.label(
+                        RichText::new(ram_info)
+                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                            .size(11.5),
                     );
                 });
 
@@ -868,13 +925,17 @@ impl OmniClipApp {
                 .show(&mut columns[1], |ui| {
                     ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new("РУЧНАЯ ЗАПИСЬ")
+                            RichText::new(t(TextKey::ManualRecordTitle, lang))
                                 .color(M3Theme::EGUI_ON_SURFACE)
                                 .size(15.5)
                                 .strong(),
                         );
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let chip_txt = if state.manual_record_active { "● ЗАПИСЬ" } else { "ГОТОВ" };
+                            let chip_txt = if state.manual_record_active {
+                                format!("● {}", t(TextKey::StatusRecording, lang))
+                            } else {
+                                t(TextKey::ManualRecordReady, lang).to_string()
+                            };
                             let chip_col = if state.manual_record_active {
                                 M3Theme::EGUI_STATUS_RED
                             } else {
@@ -885,7 +946,7 @@ impl OmniClipApp {
                     });
 
                     ui.label(
-                        RichText::new("Прямая непрерывная запись в файл MP4 без лимита времени")
+                        RichText::new(t(TextKey::ManualRecordDesc, lang))
                             .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                             .size(11.5),
                     );
@@ -896,13 +957,13 @@ impl OmniClipApp {
                         (
                             M3Theme::EGUI_STATUS_RED,
                             Color32::WHITE,
-                            format!("{}  Остановить запись (Alt+F9)", M3Icon::STOP),
+                            format!("{}  {}", M3Icon::STOP, t(TextKey::StopRecord, lang)),
                         )
                     } else {
                         (
                             M3Theme::EGUI_SURFACE_CONTAINER_HIGH,
                             M3Theme::EGUI_PRIMARY,
-                            format!("{}  Начать запись (Alt+F9)", M3Icon::PLAY),
+                            format!("{}  {}", M3Icon::PLAY, t(TextKey::StartRecord, lang)),
                         )
                     };
 
@@ -924,13 +985,17 @@ impl OmniClipApp {
                         } else {
                             String::new()
                         };
+                        let stop_hint = match lang {
+                            Language::Ru => "(Alt+F9 для остановки)",
+                            Language::En => "(Alt+F9 to stop)",
+                        };
                         (
-                            format!("● Идет запись:{} (Alt+F9 для остановки)", timer_part),
+                            format!("● {}:{timer_part} {stop_hint}", t(TextKey::StatusRecording, lang)),
                             M3Theme::EGUI_STATUS_RED,
                         )
                     } else {
                         (
-                            "Статус: В ожидании запуска по горячей клавише Alt+F9".to_string(),
+                            t(TextKey::ManualRecordStatusWaiting, lang).to_string(),
                             M3Theme::EGUI_ON_SURFACE_VARIANT,
                         )
                     };
@@ -949,7 +1014,7 @@ impl OmniClipApp {
                             .show(ui, |ui| {
                                 ui.set_min_width(ui.available_width());
                                 ui.label(
-                                    RichText::new("Последний сохраненный клип:")
+                                    RichText::new(t(TextKey::LatestSavedClip, lang))
                                         .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                                         .size(10.5),
                                 );
@@ -974,7 +1039,7 @@ impl OmniClipApp {
                                     );
                                     ui.add_space(4.0);
                                     ui.label(
-                                        RichText::new(format!("{}с · {:.1} МБ", recent.duration_secs, recent.size_mb))
+                                        RichText::new(format!("{}{s_unit} · {:.1} {mb_unit}", recent.duration_secs, recent.size_mb))
                                             .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                                             .size(11.0),
                                     );
@@ -987,15 +1052,17 @@ impl OmniClipApp {
 
     /// Renders Tab 2: Video & Encoding quality settings (OBS-style detailed configuration).
     fn render_tab_video(&self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
+
         // Section 1: Resolution & Framerate
         self.render_section_card(
             ui,
-            &format!("{}  Разрешение и частота кадров", M3Icon::VIDEO),
-            Some("Параметры масштабирования холста DXGI Desktop Duplication и целевой FPS"),
+            &format!("{}  {}", M3Icon::VIDEO, t(TextKey::SectionResolution, lang)),
+            Some(t(TextKey::SectionResolutionDesc, lang)),
             |ui| {
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Выходное разрешение:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    let resolutions = ["Исходное (Native)", "1080p (FHD)", "1440p (2K)", "4K (UHD)", "3440x1440"];
+                    ui.label(RichText::new(t(TextKey::OutputResolution, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let resolutions = [t(TextKey::PresetNative, lang), "1080p (FHD)", "1440p (2K)", "4K (UHD)", "3440x1440"];
                     for res in resolutions {
                         let is_sel = state.resolution_label == res;
                         if self.render_preset_chip(ui, res, is_sel) {
@@ -1007,8 +1074,12 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Фильтр масштабирования:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    let filters = ["Билинейный (Быстрый)", "Бикубический (Четкий)", "Ланцош (36 выборок)"];
+                    ui.label(RichText::new(t(TextKey::DownscaleFilter, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let filters = [
+                        t(TextKey::FilterBilinear, lang),
+                        t(TextKey::FilterBicubic, lang),
+                        t(TextKey::FilterLanczos, lang),
+                    ];
                     for flt in filters {
                         let is_sel = state.video_downscale_filter == flt;
                         if self.render_preset_chip(ui, flt, is_sel) {
@@ -1020,7 +1091,7 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Частота кадров (FPS):").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::Framerate, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     for fps in [30, 60, 90, 120, 144, 165, 240] {
                         let is_sel = state.target_fps == fps;
                         if self.render_preset_chip(ui, &format!("{}", fps), is_sel) {
@@ -1033,7 +1104,7 @@ impl OmniClipApp {
                 ui.add_space(6.0);
                 let mut fps_val = state.target_fps;
                 let fps_badge = format!("{} FPS", fps_val);
-                if self.render_slider_row(ui, "Точный FPS:", &mut fps_val, 15..=240, Some(1.0), &fps_badge, 64.0) {
+                if self.render_slider_row(ui, t(TextKey::ExactFps, lang), &mut fps_val, 15..=240, Some(1.0), &fps_badge, 64.0) {
                     self.state.write().target_fps = fps_val;
                     let _ = self.action_tx.send(UiAction::SetFps(fps_val));
                 }
@@ -1045,12 +1116,12 @@ impl OmniClipApp {
         // Section 2: Rate Control & Bitrate
         self.render_section_card(
             ui,
-            &format!("{}  Управление битрейтом и качество (Rate Control)", M3Icon::SLIDERS),
-            Some("Метод распределения битрейта H.264 энкодера Media Foundation"),
+            &format!("{}  {}", M3Icon::SLIDERS, t(TextKey::SectionRateControl, lang)),
+            Some(t(TextKey::SectionRateControlDesc, lang)),
             |ui| {
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Метод битрейта:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    let rate_modes = ["CBR (Постоянный)", "VBR (Переменный)", "CQP (Качественный)"];
+                    ui.label(RichText::new(t(TextKey::BitrateMode, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let rate_modes = ["CBR (Constant)", "VBR (Variable)", "CQP (Quality)"];
                     for mode in rate_modes {
                         let is_sel = state.video_rate_control == mode;
                         if self.render_preset_chip(ui, mode, is_sel) {
@@ -1062,14 +1133,14 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Целевой битрейт:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::TargetBitrate, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     let presets = [
                         (15, "15 Mbps"),
                         (25, "25 Mbps"),
-                        (35, "35 Mbps (Баланс)"),
-                        (50, "50 Mbps (Качество)"),
-                        (80, "80 Mbps (Ультра)"),
-                        (120, "120 Mbps (Макс)"),
+                        (35, t(TextKey::BitrateBalance, lang)),
+                        (50, t(TextKey::BitrateQuality, lang)),
+                        (80, t(TextKey::BitrateUltra, lang)),
+                        (120, t(TextKey::BitrateMax, lang)),
                     ];
                     for (mbps, label) in presets {
                         let is_sel = state.video_bitrate_mbps == mbps;
@@ -1083,7 +1154,7 @@ impl OmniClipApp {
                 ui.add_space(6.0);
                 let mut bitrate_val = state.video_bitrate_mbps;
                 let bit_badge = format!("{} Mbps", bitrate_val);
-                if self.render_slider_row(ui, "Слайдер битрейта:", &mut bitrate_val, 2..=150, Some(1.0), &bit_badge, 68.0) {
+                if self.render_slider_row(ui, t(TextKey::BitrateSlider, lang), &mut bitrate_val, 2..=150, Some(1.0), &bit_badge, 68.0) {
                     self.state.write().video_bitrate_mbps = bitrate_val;
                     let _ = self.action_tx.send(UiAction::SetBitrate(bitrate_val));
                 }
@@ -1091,7 +1162,7 @@ impl OmniClipApp {
                 ui.add_space(4.0);
                 let mut peak_val = state.video_peak_bitrate_mbps;
                 let peak_badge = format!("{} Mbps", peak_val);
-                if self.render_slider_row(ui, "Макс. пиковый:", &mut peak_val, 5..=200, Some(1.0), &peak_badge, 68.0) {
+                if self.render_slider_row(ui, t(TextKey::MaxPeakBitrate, lang), &mut peak_val, 5..=200, Some(1.0), &peak_badge, 68.0) {
                     self.state.write().video_peak_bitrate_mbps = peak_val;
                 }
             },
@@ -1102,12 +1173,16 @@ impl OmniClipApp {
         // Section 3: Hardware Encoder Tuning
         self.render_section_card(
             ui,
-            &format!("{}  Аппаратный энкодер и профили H.264", M3Icon::LIGHTNING),
-            Some("Аппаратное кодирование NVENC / Intel QuickSync / AMD AMF с минимальным оверхедом"),
+            &format!("{}  {}", M3Icon::LIGHTNING, t(TextKey::SectionEncoder, lang)),
+            Some(t(TextKey::SectionEncoderDesc, lang)),
             |ui| {
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Пресет скорости:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    let presets = ["Ultra Low Latency (Минимум задержки)", "Balanced (Баланс)", "Quality (Качество)"];
+                    ui.label(RichText::new(t(TextKey::EncoderPreset, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let presets = [
+                        t(TextKey::PresetLowLatency, lang),
+                        t(TextKey::PresetBalanced, lang),
+                        t(TextKey::PresetQuality, lang),
+                    ];
                     for pr in presets {
                         let is_sel = state.video_encoder_preset == pr;
                         if self.render_preset_chip(ui, pr, is_sel) {
@@ -1119,8 +1194,8 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Профиль H.264:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    for prof in ["High (Рекомендуется)", "Main", "Baseline"] {
+                    ui.label(RichText::new(t(TextKey::H264Profile, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    for prof in [t(TextKey::ProfileHighRecommended, lang), "Main", "Baseline"] {
                         let is_sel = state.video_profile == prof;
                         if self.render_preset_chip(ui, prof, is_sel) {
                             self.state.write().video_profile = prof.to_string();
@@ -1131,8 +1206,8 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Интервал GOP:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    for gop in [(1, "1 сек (Быстрый сброс)"), (2, "2 сек (Сжатие)")] {
+                    ui.label(RichText::new(t(TextKey::KeyframeInterval, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    for gop in [(1, t(TextKey::GopFast, lang)), (2, t(TextKey::GopCompress, lang))] {
                         let is_sel = state.video_gop_secs == gop.0;
                         if self.render_preset_chip(ui, gop.1, is_sel) {
                             self.state.write().video_gop_secs = gop.0;
@@ -1143,8 +1218,8 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Цветовой диапазон:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    for cr in ["Полный (Full 0-255)", "Ограниченный (Limited 16-235)"] {
+                    ui.label(RichText::new(t(TextKey::ColorRange, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    for cr in [t(TextKey::ColorRangeFull, lang), t(TextKey::ColorRangeLimited, lang)] {
                         let is_sel = state.video_color_range == cr;
                         if self.render_preset_chip(ui, cr, is_sel) {
                             self.state.write().video_color_range = cr.to_string();
@@ -1155,10 +1230,10 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("B-кадры:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::BFrames, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     for b in [0, 1, 2] {
                         let is_sel = state.video_b_frames == b;
-                        let lbl = if b == 0 { "0 (Мин. лаг)" } else { &format!("{}", b) };
+                        let lbl = if b == 0 { t(TextKey::BFramesMinLag, lang) } else { &format!("{}", b) };
                         if self.render_preset_chip(ui, lbl, is_sel) {
                             self.state.write().video_b_frames = b;
                         }
@@ -1170,14 +1245,20 @@ impl OmniClipApp {
 
     /// Renders Tab 3: Replay Buffer & RAM allocation settings.
     fn render_tab_buffer(&self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
+        let s_unit = match lang { Language::Ru => "с", Language::En => "s" };
+        let m_unit = match lang { Language::Ru => "м", Language::En => "m" };
+        let gb_unit = match lang { Language::Ru => "ГБ", Language::En => "GB" };
+        let sec_full = match lang { Language::Ru => "сек", Language::En => "sec" };
+
         self.render_section_card(
             ui,
-            &format!("{}  Глубина мгновенного повтора и лимиты памяти", M3Icon::STOPWATCH),
-            Some("Настройка кольцевого буфера FIFO в ОЗУ с автовытеснением устаревших кадров"),
+            &format!("{}  {}", M3Icon::STOPWATCH, t(TextKey::SectionBufferDuration, lang)),
+            Some(t(TextKey::SectionBufferDurationDesc, lang)),
             |ui| {
                 let mut duration_val = state.buffer_duration_secs;
-                let dur_badge = format!("{} сек", duration_val);
-                if self.render_slider_row(ui, "Длительность буфера:", &mut duration_val, 10..=1200, Some(5.0), &dur_badge, 68.0) {
+                let dur_badge = format!("{} {sec_full}", duration_val);
+                if self.render_slider_row(ui, t(TextKey::BufferDurationLabel, lang), &mut duration_val, 10..=1200, Some(5.0), &dur_badge, 68.0) {
                     self.state.write().set_buffer_duration(duration_val);
                     let _ = self.action_tx.send(UiAction::SetBufferDuration(duration_val));
                 }
@@ -1185,14 +1266,22 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Быстрые пресеты:").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.5));
+                    ui.label(RichText::new(t(TextKey::QuickPresets, lang)).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.5));
                     let presets = [
-                        (15, "15с"), (30, "30с"), (45, "45с"), (60, "1м"), (90, "90с"),
-                        (120, "2м"), (300, "5м"), (600, "10м"), (900, "15м"), (1200, "20м")
+                        (15, format!("15{s_unit}")),
+                        (30, format!("30{s_unit}")),
+                        (45, format!("45{s_unit}")),
+                        (60, format!("1{m_unit}")),
+                        (90, format!("90{s_unit}")),
+                        (120, format!("2{m_unit}")),
+                        (300, format!("5{m_unit}")),
+                        (600, format!("10{m_unit}")),
+                        (900, format!("15{m_unit}")),
+                        (1200, format!("20{m_unit}")),
                     ];
                     for (secs, lbl) in presets {
                         let is_sel = state.buffer_duration_secs == secs;
-                        if self.render_preset_chip(ui, lbl, is_sel) {
+                        if self.render_preset_chip(ui, &lbl, is_sel) {
                             self.state.write().set_buffer_duration(secs);
                             let _ = self.action_tx.send(UiAction::SetBufferDuration(secs));
                         }
@@ -1202,10 +1291,17 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Лимит памяти (RAM Cap):").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    for cap in [(1, "1 ГБ"), (2, "2 ГБ"), (4, "4 ГБ (Стандарт)"), (8, "8 ГБ"), (0, "Без лимита")] {
+                    ui.label(RichText::new(t(TextKey::MaxRamLimit, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let caps = [
+                        (1, format!("1 {gb_unit}")),
+                        (2, format!("2 {gb_unit}")),
+                        (4, t(TextKey::RamCapDefault, lang).to_string()),
+                        (8, format!("8 {gb_unit}")),
+                        (0, t(TextKey::RamCapUnlimited, lang).to_string()),
+                    ];
+                    for cap in caps {
                         let is_sel = state.buffer_ram_limit_gb == cap.0;
-                        if self.render_preset_chip(ui, cap.1, is_sel) {
+                        if self.render_preset_chip(ui, &cap.1, is_sel) {
                             self.state.write().buffer_ram_limit_gb = cap.0;
                         }
                     }
@@ -1216,8 +1312,8 @@ impl OmniClipApp {
                 if self.render_toggle_switch(
                     ui,
                     &mut autostart,
-                    "Автозапуск буфера при старте",
-                    Some("Мгновенно активировать кольцевой буфер при запуске OmniClip"),
+                    t(TextKey::AutostartBuffer, lang),
+                    Some(t(TextKey::AutostartBufferDesc, lang)),
                 ) {
                     self.state.write().buffer_autostart = autostart;
                 }
@@ -1228,8 +1324,8 @@ impl OmniClipApp {
 
         self.render_section_card(
             ui,
-            &format!("{}  Живая телеметрия кольцевого буфера ОЗУ", M3Icon::LIGHTNING),
-            Some("Статус оперативной памяти и алгоритм циклического вытеснения"),
+            &format!("{}  {}", M3Icon::LIGHTNING, t(TextKey::BufferTelemetryTitle, lang)),
+            Some(t(TextKey::BufferTelemetryDesc, lang)),
             |ui| {
                 let ram_mb = state.current_ram_bytes / (1024 * 1024);
                 let progress = if state.estimated_ram_mb > 0 {
@@ -1238,16 +1334,27 @@ impl OmniClipApp {
                     0.0
                 };
 
-                ui.label(
-                    RichText::new(format!(
+                let telemetry_text = match lang {
+                    Language::Ru => format!(
                         "Заполнено ОЗУ: {} MB из ~{} MB ({:.0}%)  •  Поток: ~{:.1} МБ/сек",
                         ram_mb,
                         state.estimated_ram_mb,
                         progress * 100.0,
                         (state.video_bitrate_mbps as f32) / 8.0
-                    ))
-                    .color(M3Theme::EGUI_ON_SURFACE)
-                    .size(12.5),
+                    ),
+                    Language::En => format!(
+                        "RAM Used: {} MB of ~{} MB ({:.0}%)  •  Bitstream: ~{:.1} MB/s",
+                        ram_mb,
+                        state.estimated_ram_mb,
+                        progress * 100.0,
+                        (state.video_bitrate_mbps as f32) / 8.0
+                    ),
+                };
+
+                ui.label(
+                    RichText::new(telemetry_text)
+                        .color(M3Theme::EGUI_ON_SURFACE)
+                        .size(12.5),
                 );
                 ui.add_space(6.0);
                 ui.add(
@@ -1258,7 +1365,7 @@ impl OmniClipApp {
 
                 ui.add_space(8.0);
                 ui.label(
-                    RichText::new("💡 OmniClip циклически перезаписывает только ОЗУ. Накопитель SSD полностью защищен от износа до нажатия Alt+F10.")
+                    RichText::new(t(TextKey::BufferTipSsd, lang))
                         .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                         .size(11.0),
                 );
@@ -1268,18 +1375,20 @@ impl OmniClipApp {
 
     /// Renders Tab 4: Audio & Microphone configuration (OBS-style mixer and tracks).
     fn render_tab_audio(&self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
+
         // Section 1: Microphone & Noise Gate
         self.render_section_card(
             ui,
-            &format!("{}  Микрофон и шумоподавление (Input Audio)", M3Icon::MIC),
-            Some("Низколатентный захват речи с настройкой активации голосом и Push-to-Talk"),
+            &format!("{}  {}", M3Icon::MIC, t(TextKey::SectionMic, lang)),
+            Some(t(TextKey::SectionMicDesc, lang)),
             |ui| {
                 let mut mic_on = state.mic_enabled;
                 if self.render_toggle_switch(
                     ui,
                     &mut mic_on,
-                    "Захват микрофона",
-                    Some("Включить аудиопоток микрофона в записи"),
+                    t(TextKey::MicCapture, lang),
+                    Some(t(TextKey::MicCaptureDesc, lang)),
                 ) {
                     self.state.write().mic_enabled = mic_on;
                     let _ = self.action_tx.send(UiAction::ToggleMic);
@@ -1289,15 +1398,16 @@ impl OmniClipApp {
 
                 // Microphone Device Selection ComboBox
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Устройство ввода:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::InputDevice, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let default_mic_lbl = t(TextKey::DefaultMic, lang);
                     let current_mic = if state.selected_capture_device == "default" || state.selected_capture_device.is_empty() {
-                        "По умолчанию (Системный микрофон)".to_string()
+                        default_mic_lbl.to_string()
                     } else {
                         state.available_capture_devices
                             .iter()
                             .find(|(id, _)| id == &state.selected_capture_device)
                             .map(|(_, name)| name.clone())
-                            .unwrap_or_else(|| "По умолчанию (Системный микрофон)".to_string())
+                            .unwrap_or_else(|| default_mic_lbl.to_string())
                     };
 
                     egui::ComboBox::from_id_salt("mic_device_combo")
@@ -1305,7 +1415,7 @@ impl OmniClipApp {
                         .width(260.0)
                         .show_ui(ui, |ui| {
                             let is_def = state.selected_capture_device == "default" || state.selected_capture_device.is_empty();
-                            if ui.selectable_label(is_def, "По умолчанию (Системный микрофон)").clicked() {
+                            if ui.selectable_label(is_def, default_mic_lbl).clicked() {
                                 self.state.write().selected_capture_device = "default".to_string();
                             }
                             for (dev_id, dev_name) in &state.available_capture_devices {
@@ -1317,7 +1427,7 @@ impl OmniClipApp {
                         });
 
                     if ui.add(
-                        egui::Button::new(RichText::new(format!("{}  Обновить", M3Icon::REFRESH)).size(11.0))
+                        egui::Button::new(RichText::new(format!("{}  {}", M3Icon::REFRESH, t(TextKey::Refresh, lang))).size(11.0))
                             .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
                             .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
                     ).clicked() {
@@ -1329,18 +1439,18 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Режим активации:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::ActivationMode, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     let ptt = state.mic_mode_ptt;
-                    if self.render_preset_chip(ui, "Постоянно (Always On)", !ptt) {
+                    if self.render_preset_chip(ui, t(TextKey::AlwaysOn, lang), !ptt) {
                         self.state.write().mic_mode_ptt = false;
                     }
-                    if self.render_preset_chip(ui, "По нажатию (Push-to-Talk)", ptt) {
+                    if self.render_preset_chip(ui, t(TextKey::PushToTalk, lang), ptt) {
                         self.state.write().mic_mode_ptt = true;
                     }
 
                     if ptt {
                         ui.add_space(10.0);
-                        ui.label(RichText::new("Клавиша PTT:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                        ui.label(RichText::new(t(TextKey::PttKey, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                         let mut ptt_key = state.mic_ptt_key.clone();
                         if ui.add(egui::TextEdit::singleline(&mut ptt_key).desired_width(40.0)).changed() {
                             self.state.write().mic_ptt_key = ptt_key;
@@ -1354,7 +1464,7 @@ impl OmniClipApp {
                 let mut vol = state.mic_volume;
                 let mic_db = if vol > 0.0 { 20.0 * vol.log10() } else { -60.0 };
                 let mic_badge = format!("{:.0}% ({:.1} dB)", vol * 100.0, mic_db);
-                if self.render_slider_row(ui, "Громкость микрофона:", &mut vol, 0.0..=2.0, Some(0.05), &mic_badge, 88.0) {
+                if self.render_slider_row(ui, t(TextKey::MicVolume, lang), &mut vol, 0.0..=2.0, Some(0.05), &mic_badge, 88.0) {
                     self.state.write().mic_volume = vol;
                     let _ = self.action_tx.send(UiAction::SetMicVolume(vol));
                 }
@@ -1363,7 +1473,7 @@ impl OmniClipApp {
 
                 let mut gate = state.mic_noise_gate_db;
                 let gate_badge = format!("{:.0} dB", gate);
-                if self.render_slider_row(ui, "Порог шумоподавления:", &mut gate, -60.0..=0.0, Some(1.0), &gate_badge, 64.0) {
+                if self.render_slider_row(ui, t(TextKey::NoiseGate, lang), &mut gate, -60.0..=0.0, Some(1.0), &gate_badge, 64.0) {
                     self.state.write().mic_noise_gate_db = gate;
                 }
             },
@@ -1374,15 +1484,15 @@ impl OmniClipApp {
         // Section 2: Game / Desktop Audio & App Filter
         self.render_section_card(
             ui,
-            &format!("{}  Системный звук и приложения (WASAPI Loopback)", M3Icon::AUDIO),
-            Some("Прямой перехват аудиопотока Windows без потери качества с фильтрацией приложений"),
+            &format!("{}  {}", M3Icon::AUDIO, t(TextKey::SectionSystemAudio, lang)),
+            Some(t(TextKey::SectionSystemAudioDesc, lang)),
             |ui| {
                 let mut game_on = state.game_audio_enabled;
                 if self.render_toggle_switch(
                     ui,
                     &mut game_on,
-                    "Захват звука игры",
-                    Some("Включить системный вывод звука игры и приложений в запись"),
+                    t(TextKey::GameAudioCapture, lang),
+                    Some(t(TextKey::GameAudioCaptureDesc, lang)),
                 ) {
                     self.state.write().game_audio_enabled = game_on;
                 }
@@ -1391,15 +1501,16 @@ impl OmniClipApp {
 
                 // Playback Device Selection ComboBox
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Устройство вывода:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::OutputDevice, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let default_speakers_lbl = t(TextKey::DefaultSpeakers, lang);
                     let current_playback = if state.selected_playback_device == "default" || state.selected_playback_device.is_empty() {
-                        "По умолчанию (Системные динамики)".to_string()
+                        default_speakers_lbl.to_string()
                     } else {
                         state.available_playback_devices
                             .iter()
                             .find(|(id, _)| id == &state.selected_playback_device)
                             .map(|(_, name)| name.clone())
-                            .unwrap_or_else(|| "По умолчанию (Системные динамики)".to_string())
+                            .unwrap_or_else(|| default_speakers_lbl.to_string())
                     };
 
                     egui::ComboBox::from_id_salt("playback_device_combo")
@@ -1407,7 +1518,7 @@ impl OmniClipApp {
                         .width(260.0)
                         .show_ui(ui, |ui| {
                             let is_def = state.selected_playback_device == "default" || state.selected_playback_device.is_empty();
-                            if ui.selectable_label(is_def, "По умолчанию (Системные динамики)").clicked() {
+                            if ui.selectable_label(is_def, default_speakers_lbl).clicked() {
                                 self.state.write().selected_playback_device = "default".to_string();
                             }
                             for (dev_id, dev_name) in &state.available_playback_devices {
@@ -1419,7 +1530,7 @@ impl OmniClipApp {
                         });
 
                     if ui.add(
-                        egui::Button::new(RichText::new(format!("{}  Обновить", M3Icon::REFRESH)).size(11.0))
+                        egui::Button::new(RichText::new(format!("{}  {}", M3Icon::REFRESH, t(TextKey::Refresh, lang))).size(11.0))
                             .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
                             .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
                     ).clicked() {
@@ -1433,7 +1544,11 @@ impl OmniClipApp {
                 let mut gvol = state.game_audio_volume;
                 let game_db = if gvol > 0.0 { 20.0 * gvol.log10() } else { -60.0 };
                 let game_badge = format!("{:.0}% ({:.1} dB)", gvol * 100.0, game_db);
-                if self.render_slider_row(ui, "Громкость игры:", &mut gvol, 0.0..=1.0, Some(0.05), &game_badge, 88.0) {
+                let game_vol_lbl = match lang {
+                    Language::Ru => "Громкость игры:",
+                    Language::En => "Game Volume:",
+                };
+                if self.render_slider_row(ui, game_vol_lbl, &mut gvol, 0.0..=1.0, Some(0.05), &game_badge, 88.0) {
                     self.state.write().game_audio_volume = gvol;
                 }
 
@@ -1441,11 +1556,11 @@ impl OmniClipApp {
 
                 // Application Audio Filtering Mode
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Фильтр приложений:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::AudioFilterMode, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     for (mode_key, mode_lbl) in [
-                        ("all", "Все звуки системы"),
-                        ("include", "Только выбранные"),
-                        ("exclude", "Исключить приложения"),
+                        ("all", t(TextKey::FilterAllAudio, lang)),
+                        ("include", t(TextKey::FilterSelectedOnly, lang)),
+                        ("exclude", t(TextKey::FilterExcludeSelected, lang)),
                     ] {
                         let is_sel = state.audio_app_filter_mode == mode_key;
                         if self.render_preset_chip(ui, mode_lbl, is_sel) {
@@ -1464,9 +1579,17 @@ impl OmniClipApp {
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 let filter_hint = if state.audio_app_filter_mode == "include" {
-                                    format!("{}  Записывать звук только из отмеченных приложений:", M3Icon::CHECK)
+                                    let hint_text = match lang {
+                                        Language::Ru => "Записывать звук только из отмеченных приложений:",
+                                        Language::En => "Record audio only from checked applications:",
+                                    };
+                                    format!("{}  {}", M3Icon::CHECK, hint_text)
                                 } else {
-                                    format!("{}  Исключить из записи звуки отмеченных приложений:", M3Icon::MUTE)
+                                    let hint_text = match lang {
+                                        Language::Ru => "Исключить из записи звуки отмеченных приложений:",
+                                        Language::En => "Exclude audio from checked applications:",
+                                    };
+                                    format!("{}  {}", M3Icon::MUTE, hint_text)
                                 };
                                 ui.label(RichText::new(filter_hint).color(M3Theme::EGUI_ON_SURFACE).size(12.0).strong());
 
@@ -1474,14 +1597,14 @@ impl OmniClipApp {
                                     // Quick select actions if apps exist
                                     if !state.detected_audio_apps.is_empty() {
                                         if ui.add(
-                                            egui::Button::new(RichText::new("Снять все").size(10.5))
+                                            egui::Button::new(RichText::new(t(TextKey::DeselectAll, lang)).size(10.5))
                                                 .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
                                                 .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
                                         ).clicked() {
                                             self.state.write().selected_audio_apps.clear();
                                         }
                                         if ui.add(
-                                            egui::Button::new(RichText::new("Выбрать все").size(10.5))
+                                            egui::Button::new(RichText::new(t(TextKey::SelectAll, lang)).size(10.5))
                                                 .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGHEST)
                                                 .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
                                         ).clicked() {
@@ -1500,7 +1623,7 @@ impl OmniClipApp {
                                     ui.horizontal(|ui| {
                                         let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                                         ui.painter().circle_filled(dot_rect.center(), 3.5, pulse_color);
-                                        ui.label(RichText::new("В реальном времени").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
+                                        ui.label(RichText::new(t(TextKey::Realtime, lang)).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
                                     });
                                 });
                             });
@@ -1518,7 +1641,7 @@ impl OmniClipApp {
                                             ui.label(RichText::new(M3Icon::AUDIO).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(14.0));
                                             ui.add_space(4.0);
                                             ui.label(
-                                                RichText::new("Сейчас ни одно приложение не воспроизводит звук. Запустите музыку, видео или игру — они появятся здесь автоматически.")
+                                                RichText::new(t(TextKey::NoAudioPlaying, lang))
                                                     .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                                                     .size(11.5),
                                             );
@@ -1605,7 +1728,7 @@ impl OmniClipApp {
                                                         ui.label(RichText::new(format!("{}%", pct)).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(10.0));
                                                     } else {
                                                         ui.label(RichText::new(M3Icon::PAUSE).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
-                                                        ui.label(RichText::new("Тишина").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(10.0));
+                                                        ui.label(RichText::new(t(TextKey::Silence, lang)).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(10.0));
                                                     }
                                                 });
                                             });
@@ -1640,11 +1763,11 @@ impl OmniClipApp {
         // Section 3: Audio Codec & Multi-Track
         self.render_section_card(
             ui,
-            &format!("{}  Формат кодировщика AAC и аудиодорожки", M3Icon::EQUALIZER),
-            Some("Битрейт, частота дискретизации и разделение дорожек для видеомонтажа"),
+            &format!("{}  {}", M3Icon::EQUALIZER, t(TextKey::SectionAudioCodec, lang)),
+            Some(t(TextKey::SectionAudioCodecDesc, lang)),
             |ui| {
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Битрейт AAC:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::AacBitrate, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     for kbps in [96, 128, 160, 192, 256, 320] {
                         let is_sel = state.audio_bitrate_kbps == kbps;
                         let lbl = format!("{} kbps", kbps);
@@ -1657,7 +1780,7 @@ impl OmniClipApp {
                 ui.add_space(8.0);
 
                 self.render_row(ui, |ui| {
-                    ui.label(RichText::new("Частота дискретизации:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    ui.label(RichText::new(t(TextKey::SampleRate, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
                     for sr in [(44100, "44.1 kHz"), (48000, "48.0 kHz (Native)")] {
                         let is_sel = state.audio_sample_rate_hz == sr.0;
                         if self.render_preset_chip(ui, sr.1, is_sel) {
@@ -1666,8 +1789,8 @@ impl OmniClipApp {
                     }
 
                     ui.add_space(16.0);
-                    ui.label(RichText::new("Каналы:").color(M3Theme::EGUI_ON_SURFACE).size(12.5));
-                    for ch in ["Стерео (2.0)", "Моно (1.0)"] {
+                    ui.label(RichText::new(t(TextKey::Channels, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    for ch in [t(TextKey::ChannelStereo, lang), t(TextKey::ChannelMono, lang)] {
                         let is_sel = state.audio_channels == ch;
                         if self.render_preset_chip(ui, ch, is_sel) {
                             self.state.write().audio_channels = ch.to_string();
@@ -1681,8 +1804,8 @@ impl OmniClipApp {
                 if self.render_toggle_switch(
                     ui,
                     &mut multi,
-                    "Раздельные аудиодорожки в MP4",
-                    Some("Дорожка 1 = Игра / Система, Дорожка 2 = Микрофон (отдельные дорожки для Premiere / DaVinci Resolve)"),
+                    t(TextKey::MultiTrackAudio, lang),
+                    Some(t(TextKey::MultiTrackAudioDesc, lang)),
                 ) {
                     self.state.write().audio_multi_track = multi;
                     let _ = self.action_tx.send(UiAction::SetAudioMultiTrack(multi));
@@ -1693,19 +1816,21 @@ impl OmniClipApp {
 
     /// Renders Tab 5: Hotkeys overview with keyboard keycaps design.
     fn render_tab_hotkeys(&self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
         self.render_section_card(
             ui,
-            &format!("{}  Горячие клавиши управления", M3Icon::KEYBOARD),
-            Some("Низкоуровневые глобальные комбинации клавиш Win32, работающие поверх любых игр"),
+            &format!("{}  {}", M3Icon::KEYBOARD, t(TextKey::SectionHotkeys, lang)),
+            Some(t(TextKey::SectionHotkeysDesc, lang)),
             |ui| {
-                let ptt_display = if state.mic_mode_ptt { &state.mic_ptt_key } else { "ВЫКЛ (Always On)" };
+                let ptt_off = if lang == Language::Ru { "ВЫКЛ (Always On)" } else { "OFF (Always On)" };
+                let ptt_display = if state.mic_mode_ptt { &state.mic_ptt_key } else { ptt_off };
                 let hotkeys = [
-                    ("Сохранить мгновенный повтор", "Alt", "F10", "Сбрасывает буфер ОЗУ в MP4 файл"),
-                    ("Старт / Стоп непрерывной записи", "Alt", "F9", "Запускает прямую запись видеопотока на диск"),
-                    ("Открыть игровой оверлей хаба", "Alt", "Z", "Отображает панель управления без сворачивания игры"),
-                    ("Активация микрофона (Push-to-Talk)", ptt_display, "", "Запись голоса только при зажатой клавише"),
-                    ("Сделать мгновенный снимок экрана", "Alt", "F1", "Сохраняет скриншот в исходном разрешении"),
-                    ("Быстро закрыть оверлей", "Esc", "", "Мгновенно возвращает фокус управления в игру"),
+                    (t(TextKey::ActionSaveReplay, lang), "Alt", "F10", t(TextKey::DescSaveReplay, lang)),
+                    (t(TextKey::ActionToggleRecord, lang), "Alt", "F9", t(TextKey::DescToggleRecord, lang)),
+                    (t(TextKey::ActionToggleOverlay, lang), "Alt", "Z", t(TextKey::DescToggleOverlay, lang)),
+                    (t(TextKey::HotkeysPtt, lang), ptt_display, "", t(TextKey::HotkeysPttDesc, lang)),
+                    (t(TextKey::ActionTakeScreenshot, lang), "Alt", "F1", t(TextKey::DescTakeScreenshot, lang)),
+                    (t(TextKey::HotkeysEsc, lang), "Esc", "", t(TextKey::HotkeysEscDesc, lang)),
                 ];
 
                 for (name, key1, key2, desc) in hotkeys {
@@ -1761,21 +1886,22 @@ impl OmniClipApp {
 
     /// Renders Tab 6: Storage folder, file naming patterns, and clips history.
     fn render_tab_storage(&mut self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
         let path_edit_buffer = &mut self.path_edit_buffer;
         let action_tx = &self.action_tx;
         let state_lock = &self.state;
 
         Self::card(
             ui,
-            &format!("{}  Папка сохранения и шаблон имен файлов", M3Icon::FOLDER),
-            Some("Настройка путей сохранения, автоматического именования и уведомлений"),
+            &format!("{}  {}", M3Icon::FOLDER, t(TextKey::SectionOutputDir, lang)),
+            Some(t(TextKey::SectionOutputDirDesc, lang)),
             |ui| {
                 Self::row(ui, |ui| {
                     ui.allocate_ui_with_layout(
                         Vec2::new(180.0, 26.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.label(RichText::new("Папка сохранения:").color(M3Theme::EGUI_ON_SURFACE).size(12.0));
+                            ui.label(RichText::new(format!("{}:", t(TextKey::TabStorage, lang))).color(M3Theme::EGUI_ON_SURFACE).size(12.0));
                         },
                     );
 
@@ -1790,7 +1916,7 @@ impl OmniClipApp {
 
                     let browse_btn = ui.add(
                         egui::Button::new(
-                            RichText::new(format!("{}  Обзор...", M3Icon::FOLDER))
+                            RichText::new(format!("{}  {}", M3Icon::FOLDER, t(TextKey::ChooseFolder, lang)))
                                 .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
                                 .size(11.5)
                                 .strong(),
@@ -1800,7 +1926,7 @@ impl OmniClipApp {
                         .min_size(Vec2::new(88.0, 26.0)),
                     );
                     if browse_btn.clicked() {
-                        if let Some(picked) = crate::ui::pick_folder() {
+                        if let Some(picked) = crate::ui::pick_folder(Some(t(TextKey::FolderPickerTitle, lang))) {
                             *path_edit_buffer = picked.to_string_lossy().to_string();
                             state_lock.write().output_dir = picked.clone();
                             let _ = action_tx.send(UiAction::SetOutputDir(picked));
@@ -1811,7 +1937,7 @@ impl OmniClipApp {
 
                     let apply_btn = ui.add(
                         egui::Button::new(
-                            RichText::new("Применить")
+                            RichText::new(t(TextKey::Apply, lang))
                                 .color(M3Theme::EGUI_ON_PRIMARY)
                                 .size(11.5)
                                 .strong(),
@@ -1830,7 +1956,7 @@ impl OmniClipApp {
 
                     let open_btn = ui.add(
                         egui::Button::new(
-                            RichText::new(format!("{}  В Проводнике", M3Icon::OPEN_EXTERNAL))
+                            RichText::new(format!("{}  {}", M3Icon::OPEN_EXTERNAL, t(TextKey::InExplorer, lang)))
                                 .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                                 .size(11.5),
                         )
@@ -1852,7 +1978,7 @@ impl OmniClipApp {
                         Vec2::new(180.0, 26.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.label(RichText::new("Шаблон имени файла:").color(M3Theme::EGUI_ON_SURFACE).size(12.0));
+                            ui.label(RichText::new(t(TextKey::FilenameTemplate, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.0));
                         },
                     );
                     let mut pattern = state.filename_pattern.clone();
@@ -1881,7 +2007,7 @@ impl OmniClipApp {
                         Vec2::new(180.0, 20.0),
                         Layout::left_to_right(Align::Center),
                         |ui| {
-                            ui.label(RichText::new("Предпросмотр имени:").color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
+                            ui.label(RichText::new(t(TextKey::TemplatePreview, lang)).color(M3Theme::EGUI_ON_SURFACE_VARIANT).size(11.0));
                         },
                     );
                     ui.label(
@@ -1898,8 +2024,8 @@ impl OmniClipApp {
                 if Self::toggle_switch(
                     ui,
                     &mut sound_notif,
-                    "Звуковое оповещение о сохранении",
-                    Some("Воспроизводить ненавязчивый системный сигнал при записи клипа на диск"),
+                    t(TextKey::SoundNotify, lang),
+                    Some(t(TextKey::SoundNotifyDesc, lang)),
                 ) {
                     state_lock.write().sound_notify_on_save = sound_notif;
                 }
@@ -1910,16 +2036,18 @@ impl OmniClipApp {
 
         self.render_section_card(
             ui,
-            &format!("{}  История записей за текущую сессию", M3Icon::VIDEO),
-            Some("Быстрый доступ к сохраненным видеоклипам и открытие в Проводнике"),
+            &format!("{}  {}", M3Icon::VIDEO, t(TextKey::SectionRecentReplays, lang)),
+            Some(t(TextKey::SectionRecentReplaysDesc, lang)),
             |ui| {
                 if state.recent_replays.is_empty() {
                     ui.label(
-                        RichText::new("Пока нет сохраненных записей в этой сессии. Нажмите Alt+F10 в игре!")
+                        RichText::new(t(TextKey::NoRecentReplays, lang))
                             .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                             .size(11.5),
                     );
                 } else {
+                    let sec_unit = if lang == Language::Ru { "с" } else { "s" };
+                    let mb_unit = if lang == Language::Ru { "МБ" } else { "MB" };
                     for clip in &state.recent_replays {
                         egui::Frame::NONE
                             .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
@@ -1958,7 +2086,7 @@ impl OmniClipApp {
                                             .inner_margin(egui::vec2(8.0, 3.0))
                                             .show(ui, |ui| {
                                                 ui.label(
-                                                    RichText::new(format!("{}с · {:.1} МБ", clip.duration_secs, clip.size_mb))
+                                                    RichText::new(format!("{}{sec_unit} · {:.1} {mb_unit}", clip.duration_secs, clip.size_mb))
                                                         .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                                                         .size(11.0),
                                                 );
@@ -1967,7 +2095,7 @@ impl OmniClipApp {
                                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                             let show_btn = ui.add(
                                                 egui::Button::new(
-                                                    RichText::new(format!("{}  Открыть", M3Icon::OPEN_EXTERNAL))
+                                                    RichText::new(format!("{}  {}", M3Icon::OPEN_EXTERNAL, t(TextKey::Open, lang)))
                                                         .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
                                                         .size(11.5)
                                                         .strong(),
@@ -1994,12 +2122,13 @@ impl OmniClipApp {
 
     /// Renders the bottom quick status and hint bar with crisp vector icons.
     fn render_bottom_bar(&self, ui: &mut egui::Ui, state: &UiState) {
+        let lang = state.language;
         ui.horizontal(|ui| {
             // Clickable Mic toggle chip
             let mic_lbl = if state.mic_enabled {
-                format!("{}  Микрофон: ВКЛ ({:.0}%)", M3Icon::MIC, state.mic_volume * 100.0)
+                format!("{}  {} ({:.0}%)", M3Icon::MIC, t(TextKey::MicStatusOn, lang), state.mic_volume * 100.0)
             } else {
-                format!("{}  Микрофон: ВЫКЛ", M3Icon::MIC)
+                format!("{}  {}", M3Icon::MIC, t(TextKey::MicStatusOff, lang))
             };
             let mic_chip = ui.add(
                 egui::Button::new(
@@ -2021,7 +2150,7 @@ impl OmniClipApp {
             // Speakers chip
             ui.add(
                 egui::Label::new(
-                    RichText::new(format!("{}  Динамики: 48kHz Stereo", M3Icon::AUDIO))
+                    RichText::new(format!("{}  {}", M3Icon::AUDIO, t(TextKey::SpeakersStatus, lang)))
                         .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                         .size(11.5),
                 )
@@ -2053,7 +2182,7 @@ impl OmniClipApp {
 
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(
-                    RichText::new("Нажмите Esc или Alt+Z для возврата в игру")
+                    RichText::new(t(TextKey::BottomEscHint, lang))
                         .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
                         .size(11.5),
                 );

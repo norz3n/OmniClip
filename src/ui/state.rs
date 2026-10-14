@@ -208,6 +208,8 @@ pub struct UiState {
     pub active_toast: Option<ToastNotification>,
     /// Incremental ID counter for toasts.
     toast_id_counter: u64,
+    /// Active UI language (Russian or English).
+    pub language: crate::ui::i18n::Language,
 }
 
 impl UiState {
@@ -219,6 +221,7 @@ impl UiState {
         mic_enabled: bool,
         mic_volume: f32,
         output_dir: PathBuf,
+        language: crate::ui::i18n::Language,
     ) -> Self {
         let bitrate_mbps = video_bitrate_bps / 1_000_000;
         let bytes_per_sec = (bitrate_mbps as u64 * 1_000_000) / 8;
@@ -274,7 +277,13 @@ impl UiState {
             is_saving_disk: false,
             active_toast: None,
             toast_id_counter: 0,
+            language,
         }
+    }
+
+    /// Sets the active UI language.
+    pub fn set_language(&mut self, language: crate::ui::i18n::Language) {
+        self.language = language;
     }
 
     /// Updates dynamic RAM consumption from the live ring buffer.
@@ -342,6 +351,7 @@ pub fn create_shared_ui_state(
     mic_enabled: bool,
     mic_volume: f32,
     output_dir: PathBuf,
+    language: crate::ui::i18n::Language,
 ) -> SharedUiState {
     Arc::new(RwLock::new(UiState::new(
         buffer_duration_secs,
@@ -350,6 +360,7 @@ pub fn create_shared_ui_state(
         mic_enabled,
         mic_volume,
         output_dir,
+        language,
     )))
 }
 
@@ -366,6 +377,7 @@ mod tests {
             true,
             1.0,
             PathBuf::from("replays"),
+            crate::ui::i18n::Language::Ru,
         );
 
         assert!(state.replay_buffer_active);
@@ -385,6 +397,7 @@ mod tests {
             true,
             1.0,
             PathBuf::from("replays"),
+            crate::ui::i18n::Language::Ru,
         );
 
         let initial_ram = state.estimated_ram_mb;
@@ -403,6 +416,7 @@ mod tests {
             true,
             1.0,
             PathBuf::from("replays"),
+            crate::ui::i18n::Language::Ru,
         );
 
         assert!(state.active_toast.is_none());

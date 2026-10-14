@@ -19,7 +19,7 @@ use omni_clip::encoder::{DxgiDeviceManager, H264Encoder, MfPlatformGuard};
 use omni_clip::muxer::Mp4Muxer;
 use omni_clip::platform::hotkey::HotkeyListener;
 use omni_clip::platform::time::QpcTimer;
-use omni_clip::ui::{create_shared_ui_state, OmniClipApp, UiAction};
+use omni_clip::ui::{create_shared_ui_state, Language, OmniClipApp, TextKey, t, UiAction};
 
 /// Global shared run flag; also exported to the console handler via a static pointer.
 /// Using Arc<AtomicBool> so the eframe app can read it on the main thread without unsafe.
@@ -107,6 +107,23 @@ fn main() -> Result<()> {
     let config = Config::load();
     let config_shared = Arc::new(parking_lot::Mutex::new(config.clone()));
 
+    // Shared UI state initialized with detected/configured language
+    let initial_lang = Language::from_code(&config.language);
+    let ui_state = create_shared_ui_state(
+        config.buffer_duration_secs,
+        config.fps,
+        config.video_bitrate,
+        config.mic_enabled,
+        config.mic_volume,
+        config.output_dir.clone(),
+        initial_lang,
+    );
+    {
+        let mut st = ui_state.write();
+        st.filename_pattern = config.filename_pattern.clone();
+        st.audio_multi_track = config.audio_multi_track;
+    }
+
     let ring_buffer = create_shared_ring_buffer(
         config.buffer_duration_hns(),
         1920,
@@ -149,6 +166,7 @@ fn main() -> Result<()> {
     // Background Disk Writer thread with dynamic user-configured destination path
     let (dump_tx, dump_rx) = crossbeam_channel::unbounded::<(RingBufferSnapshot, PathBuf)>();
     let save_notify_tx_writer = save_notify_tx.clone();
+    let ui_state_writer = ui_state.clone();
     let writer_handle = thread::Builder::new()
         .name("omniclip-disk-writer".to_string())
         .spawn(move || {
@@ -162,7 +180,8 @@ fn main() -> Result<()> {
                             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
                             .unwrap_or(0.0);
                         let _ = save_notify_tx_writer.send((path.clone(), duration_secs, size_mb));
-                        omni_clip::ui::show_hud_toast(path, duration_secs, size_mb);
+                        let lang = ui_state_writer.read().language;
+                        omni_clip::ui::show_hud_toast(path, duration_secs, size_mb, lang);
                         if let Some(ctx) = egui_ctx_writer.lock().as_ref() {
                             ctx.request_repaint();
                         }
@@ -187,20 +206,7 @@ fn main() -> Result<()> {
         }
     };
 
-    // Shared UI state and action channel
-    let ui_state = create_shared_ui_state(
-        config.buffer_duration_secs,
-        config.fps,
-        config.video_bitrate,
-        config.mic_enabled,
-        config.mic_volume,
-        config.output_dir.clone(),
-    );
-    {
-        let mut st = ui_state.write();
-        st.filename_pattern = config.filename_pattern.clone();
-        st.audio_multi_track = config.audio_multi_track;
-    }
+    // Action channel for communicating UI state changes to capture thread
     let (ui_action_tx, ui_action_rx) = crossbeam_channel::unbounded::<UiAction>();
 
     // Overlay-only events for egui (ToggleOverlay goes here)
@@ -441,6 +447,10 @@ fn main() -> Result<()> {
                                 config_capture.lock().audio_multi_track = multi;
                                 let _ = config_capture.lock().save();
                             }
+                            UiAction::SetLanguage(code) => {
+                                config_capture.lock().language = code;
+                                let _ = config_capture.lock().save();
+                            }
                             UiAction::TakeScreenshot => {
                                 if let Some(ref frame) = last_frame {
                                     let out_dir = config_capture.lock().output_dir.clone();
@@ -458,10 +468,11 @@ fn main() -> Result<()> {
                                                 .map(|m| m.len() as f64 / (1024.0 * 1024.0))
                                                 .unwrap_or(0.0);
                                             let _ = save_notify_tx_capture.send((shot_path.clone(), 0, size_mb));
-                                            omni_clip::ui::show_hud_toast(shot_path.clone(), 0, size_mb);
+                                            let lang = ui_state_clone.read().language;
+                                            omni_clip::ui::show_hud_toast(shot_path.clone(), 0, size_mb, lang);
                                             {
                                                 let mut st = ui_state_clone.write();
-                                                st.push_toast("Скриншот сохранён", shot_path, 0, size_mb);
+                                                st.push_toast(t(TextKey::ToastScreenshotSaved, lang), shot_path, 0, size_mb);
                                             }
                                             if let Some(ctx) = egui_ctx_capture.lock().as_ref() {
                                                 ctx.request_repaint();
@@ -590,7 +601,7 @@ fn main() -> Result<()> {
     };
 
     let app = OmniClipApp::new(
-        ui_state,
+        ui_state.clone(),
         ui_action_tx.clone(),
         overlay_rx,
         save_notify_rx,
@@ -600,6 +611,7 @@ fn main() -> Result<()> {
     let tray_manager = match omni_clip::ui::TrayManager::spawn(
         ui_action_tx,
         egui_ctx_shared.clone(),
+        Some(ui_state.clone()),
         running.clone(),
     ) {
         Ok(t) => {

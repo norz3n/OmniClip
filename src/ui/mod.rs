@@ -1,9 +1,11 @@
 pub mod app;
+pub mod i18n;
 pub mod state;
 pub mod theme;
 pub mod tray;
 
 pub use app::{OmniClipApp, UiAction};
+pub use i18n::{t, Language, TextKey};
 pub use state::{
     create_shared_ui_state, AudioAppEntry, HubTab, SavedReplayEntry, SharedUiState, ToastNotification, UiState,
 };
@@ -185,8 +187,9 @@ pub fn set_overlay_visible(visible: bool) {
 }
 
 /// Launches the native modern Windows folder picker dialog and returns the selected path.
-pub fn pick_folder() -> Option<std::path::PathBuf> {
-    std::thread::spawn(|| {
+pub fn pick_folder(title: Option<&str>) -> Option<std::path::PathBuf> {
+    let title_owned = title.map(|s| s.to_string());
+    std::thread::spawn(move || {
         unsafe {
             use windows::Win32::System::Com::{
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
@@ -202,8 +205,10 @@ pub fn pick_folder() -> Option<std::path::PathBuf> {
                 let dialog: IFileOpenDialog =
                     CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
                 dialog.SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM).ok()?;
+                let title_str = title_owned.as_deref().unwrap_or("OmniClip — Select Storage Folder");
+                let title_u16: Vec<u16> = title_str.encode_utf16().chain(std::iter::once(0)).collect();
                 dialog
-                    .SetTitle(windows::core::w!("Выберите папку для сохранения повторов OmniClip"))
+                    .SetTitle(windows::core::PCWSTR(title_u16.as_ptr()))
                     .ok()?;
                 dialog.Show(None).ok()?;
                 let item = dialog.GetResult().ok()?;
@@ -255,6 +260,7 @@ pub struct HudToastData {
     pub filename: String,
     pub duration_secs: u32,
     pub size_mb: f64,
+    pub language: crate::ui::i18n::Language,
 }
 
 static HUD_SENDER: parking_lot::RwLock<Option<crossbeam_channel::Sender<HudToastData>>> =
@@ -263,17 +269,20 @@ static HUD_ACTIVE_DATA: parking_lot::RwLock<Option<HudToastData>> = parking_lot:
 static HUD_STOP_SIGNAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Triggers a non-intrusive on-screen HUD toast notification over any game or window.
-pub fn show_hud_toast(filepath: std::path::PathBuf, duration_secs: u32, size_mb: f64) {
+pub fn show_hud_toast(filepath: std::path::PathBuf, duration_secs: u32, size_mb: f64, lang: crate::ui::i18n::Language) {
     let filename = filepath
         .file_name()
         .map(|f| f.to_string_lossy().to_string())
         .unwrap_or_else(|| "replay.mp4".to_string());
 
+    let title = crate::ui::i18n::t(crate::ui::i18n::TextKey::ToastReplaySaved, lang).to_string();
+
     let data = HudToastData {
-        title: "Повтор сохранен!".to_string(),
+        title,
         filename,
         duration_secs,
         size_mb,
+        language: lang,
     };
 
     if let Some(sender) = HUD_SENDER.read().as_ref() {
@@ -598,7 +607,7 @@ unsafe fn draw_hud_toast(hwnd: windows::Win32::Foundation::HWND, hdc: windows::W
     let _ = SelectObject(mem_dc, font_title);
     let _ = SetBkMode(mem_dc, TRANSPARENT);
     let _ = SetTextColor(mem_dc, COLORREF(0x00FFFFFF));
-    let title_utf16: Vec<u16> = "Повтор сохранен!".encode_utf16().collect();
+    let title_utf16: Vec<u16> = data.title.encode_utf16().collect();
     let _ = TextOutW(mem_dc, 152, 32, &title_utf16);
     let _ = DeleteObject(font_title);
 
@@ -677,7 +686,11 @@ unsafe fn draw_hud_toast(hwnd: windows::Win32::Foundation::HWND, hdc: windows::W
     };
 
     // Chip 1: Duration Pill
-    let chip_1_str = format!("{} сек", data.duration_secs);
+    let sec_suffix = match data.language {
+        crate::ui::i18n::Language::Ru => "сек",
+        crate::ui::i18n::Language::En => "sec",
+    };
+    let chip_1_str = format!("{} {}", data.duration_secs, sec_suffix);
     let chip_1_w = draw_pill(
         152,
         &chip_1_str,
@@ -687,7 +700,11 @@ unsafe fn draw_hud_toast(hwnd: windows::Win32::Foundation::HWND, hdc: windows::W
     );
 
     // Chip 2: File Size Pill (Primary Accent Pill)
-    let chip_2_str = format!("{:.1} МБ", data.size_mb);
+    let mb_suffix = match data.language {
+        crate::ui::i18n::Language::Ru => "МБ",
+        crate::ui::i18n::Language::En => "MB",
+    };
+    let chip_2_str = format!("{:.1} {}", data.size_mb, mb_suffix);
     let chip_2_x = 152 + chip_1_w + 16;
     let chip_2_w = draw_pill(
         chip_2_x,
