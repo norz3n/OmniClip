@@ -39,6 +39,8 @@ pub struct DxgiDuplicator {
     active_texture_idx: usize,
     width: u32,
     height: u32,
+    offset_x: i32,
+    offset_y: i32,
     refresh_rate_numerator: u32,
     refresh_rate_denominator: u32,
 }
@@ -55,6 +57,8 @@ impl DxgiDuplicator {
             active_texture_idx: 0,
             width: 0,
             height: 0,
+            offset_x: 0,
+            offset_y: 0,
             refresh_rate_numerator: 60,
             refresh_rate_denominator: 1,
         };
@@ -92,6 +96,8 @@ impl DxgiDuplicator {
 
         self.width = width;
         self.height = height;
+        self.offset_x = desc.DesktopCoordinates.left;
+        self.offset_y = desc.DesktopCoordinates.top;
 
         let output1: IDXGIOutput1 = output
             .cast()
@@ -134,7 +140,7 @@ impl DxgiDuplicator {
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             CPUAccessFlags: 0,
-            MiscFlags: 0,
+            MiscFlags: windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_GDI_COMPATIBLE.0 as u32,
         };
 
         let mut texture: Option<ID3D11Texture2D> = None;
@@ -189,6 +195,27 @@ impl DxgiDuplicator {
                 let release_res = unsafe { duplicator.ReleaseFrame() };
                 if let Err(e) = release_res {
                     warn!("ReleaseFrame returned error: {}", e);
+                }
+
+                // Render hardware mouse cursor directly onto the captured VRAM frame
+                if let Ok(surface) = dst_texture.cast::<windows::Win32::Graphics::Dxgi::IDXGISurface1>() {
+                    if let Ok(hdc) = unsafe { surface.GetDC(false) } {
+                        unsafe {
+                            use windows::Win32::UI::WindowsAndMessaging::{
+                                DrawIconEx, GetCursorInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
+                            };
+                            let mut ci = CURSORINFO {
+                                cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                                ..Default::default()
+                            };
+                            if GetCursorInfo(&mut ci).is_ok() && (ci.flags.0 & CURSOR_SHOWING.0) != 0 {
+                                let x = ci.ptScreenPos.x - self.offset_x;
+                                let y = ci.ptScreenPos.y - self.offset_y;
+                                let _ = DrawIconEx(hdc, x, y, ci.hCursor, 0, 0, 0, None, DI_NORMAL);
+                            }
+                            let _ = surface.ReleaseDC(None);
+                        }
+                    }
                 }
 
                 let captured = CapturedFrame {

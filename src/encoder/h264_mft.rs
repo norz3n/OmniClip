@@ -215,6 +215,21 @@ impl H264Encoder {
         self.bitrate
     }
 
+    /// Dynamically sets the video encoding bitrate in bits per second.
+    pub fn set_bitrate(&mut self, bitrate: u32) {
+        self.bitrate = bitrate;
+        unsafe {
+            if let Ok(codec_api) = self.transform.cast::<windows::Win32::Media::MediaFoundation::ICodecAPI>() {
+                let var = windows::core::VARIANT::from(bitrate);
+                let _ = codec_api.SetValue(
+                    &windows::Win32::Media::MediaFoundation::CODECAPI_AVEncCommonMeanBitRate,
+                    &var,
+                );
+            }
+        }
+        self.request_keyframe();
+    }
+
     /// GOP size (keyframe interval in frames).
     #[inline]
     pub fn gop_size(&self) -> u32 {

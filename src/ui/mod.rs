@@ -8,7 +8,7 @@ pub use state::{
     create_shared_ui_state, AudioAppEntry, HubTab, SavedReplayEntry, SharedUiState, ToastNotification, UiState,
 };
 pub use theme::{M3Icon, M3Theme};
-pub use tray::TrayIcon;
+pub use tray::{TrayIcon, TrayManager};
 
 static OVERLAY_HWND: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 static OVERLAY_IS_VISIBLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

@@ -105,6 +105,8 @@ fn resample_linear(
 /// WASAPI Loopback system audio and microphone capture engine running on a dedicated thread.
 pub struct WasapiLoopbackCapture {
     running: Arc<AtomicBool>,
+    mic_enabled: Arc<AtomicBool>,
+    mic_volume: Arc<parking_lot::Mutex<f32>>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
@@ -131,6 +133,11 @@ impl WasapiLoopbackCapture {
     ) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
+
+        let mic_enabled_arc = Arc::new(AtomicBool::new(mic_enabled));
+        let mic_volume_arc = Arc::new(parking_lot::Mutex::new(mic_volume));
+        let mic_enabled_thread = mic_enabled_arc.clone();
+        let mic_volume_thread = mic_volume_arc.clone();
 
         let (init_tx, init_rx) = crossbeam_channel::bounded::<Result<()>>(1);
 
@@ -223,7 +230,7 @@ impl WasapiLoopbackCapture {
                     );
 
                     // 2. Optional Microphone Capture Endpoint
-                    let mic_opt: MicInit = if mic_enabled {
+                    let mic_opt: MicInit = {
                         let mic_init_result = (|| -> Result<(IAudioClient, IAudioCaptureClient, bool, u32, u32)> {
                             let mic_device = unsafe {
                                 if let Some(ref dev_id) = capture_device_id {
@@ -303,8 +310,6 @@ impl WasapiLoopbackCapture {
                                 None
                             }
                         }
-                    } else {
-                        None
                     };
 
                     Ok(((audio_client, capture_client, aac_encoder, is_float, sample_rate, channels), mic_opt))
@@ -339,6 +344,9 @@ impl WasapiLoopbackCapture {
                 let mut mic_resample_phase = 0.0f64;
 
                 while running_clone.load(Ordering::SeqCst) {
+                    let is_mic_active = mic_enabled_thread.load(Ordering::Relaxed);
+                    let cur_mic_volume = if is_mic_active { *mic_volume_thread.lock() } else { 0.0 };
+
                     // Poll and buffer incoming microphone packets
                     if let Some((_, ref mic_capture, m_float, m_rate, m_ch)) = mic_client_opt {
                         let mut m_packet = unsafe { mic_capture.GetNextPacketSize().unwrap_or(0) };
@@ -427,13 +435,13 @@ impl WasapiLoopbackCapture {
                                 if mic_encoder_opt.is_some() {
                                     pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
                                     pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
-                                    let m_l = ((mic_l * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
-                                    let m_r = ((mic_r * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                    let m_l = ((mic_l * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                    let m_r = ((mic_r * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
                                     mic_pcm_buffer.extend_from_slice(&m_l.to_le_bytes());
                                     mic_pcm_buffer.extend_from_slice(&m_r.to_le_bytes());
                                 } else {
-                                    let mix_l = (mic_l * mic_volume).clamp(-1.0, 1.0);
-                                    let mix_r = (mic_r * mic_volume).clamp(-1.0, 1.0);
+                                    let mix_l = (mic_l * cur_mic_volume).clamp(-1.0, 1.0);
+                                    let mix_r = (mic_r * cur_mic_volume).clamp(-1.0, 1.0);
                                     let s_l = (mix_l * 32767.0) as i16;
                                     let s_r = (mix_r * 32767.0) as i16;
                                     pcm_buffer.extend_from_slice(&s_l.to_le_bytes());
@@ -509,13 +517,13 @@ impl WasapiLoopbackCapture {
                                     if mic_encoder_opt.is_some() {
                                         pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
                                         pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
-                                        let m_l = ((mic_l * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
-                                        let m_r = ((mic_r * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        let m_l = ((mic_l * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        let m_r = ((mic_r * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
                                         mic_pcm_buffer.extend_from_slice(&m_l.to_le_bytes());
                                         mic_pcm_buffer.extend_from_slice(&m_r.to_le_bytes());
                                     } else {
-                                        let mix_l = (mic_l * mic_volume).clamp(-1.0, 1.0);
-                                        let mix_r = (mic_r * mic_volume).clamp(-1.0, 1.0);
+                                        let mix_l = (mic_l * cur_mic_volume).clamp(-1.0, 1.0);
+                                        let mix_r = (mic_r * cur_mic_volume).clamp(-1.0, 1.0);
                                         let s_l = (mix_l * 32767.0) as i16;
                                         let s_r = (mix_r * 32767.0) as i16;
                                         pcm_buffer.extend_from_slice(&s_l.to_le_bytes());
@@ -610,13 +618,13 @@ impl WasapiLoopbackCapture {
                                         let s_r = (r.clamp(-1.0, 1.0) * 32767.0) as i16;
                                         pcm_buffer.extend_from_slice(&s_l.to_le_bytes());
                                         pcm_buffer.extend_from_slice(&s_r.to_le_bytes());
-                                        let m_l = ((mic_l * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
-                                        let m_r = ((mic_r * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        let m_l = ((mic_l * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        let m_r = ((mic_r * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
                                         mic_pcm_buffer.extend_from_slice(&m_l.to_le_bytes());
                                         mic_pcm_buffer.extend_from_slice(&m_r.to_le_bytes());
                                     } else {
-                                        let mix_l = (l + mic_l * mic_volume).clamp(-1.0, 1.0);
-                                        let mix_r = (r + mic_r * mic_volume).clamp(-1.0, 1.0);
+                                        let mix_l = (l + mic_l * cur_mic_volume).clamp(-1.0, 1.0);
+                                        let mix_r = (r + mic_r * cur_mic_volume).clamp(-1.0, 1.0);
                                         let s_l = (mix_l * 32767.0) as i16;
                                         let s_r = (mix_r * 32767.0) as i16;
                                         pcm_buffer.extend_from_slice(&s_l.to_le_bytes());
@@ -680,8 +688,27 @@ impl WasapiLoopbackCapture {
 
         Ok(Self {
             running,
+            mic_enabled: mic_enabled_arc,
+            mic_volume: mic_volume_arc,
             thread_handle: Some(handle),
         })
+    }
+
+    /// Dynamically sets the microphone recording volume multiplier.
+    pub fn set_mic_volume(&self, vol: f32) {
+        *self.mic_volume.lock() = vol;
+    }
+
+    /// Dynamically enables or disables microphone recording.
+    pub fn set_mic_enabled(&self, enabled: bool) {
+        self.mic_enabled.store(enabled, Ordering::SeqCst);
+    }
+
+    /// Toggles the microphone between muted and active, returning the new state.
+    pub fn toggle_mic(&self) -> bool {
+        let new_state = !self.mic_enabled.load(Ordering::SeqCst);
+        self.mic_enabled.store(new_state, Ordering::SeqCst);
+        new_state
     }
 
     /// Stops the audio capture thread.

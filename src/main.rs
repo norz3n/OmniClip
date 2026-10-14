@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -102,7 +104,8 @@ fn main() -> Result<()> {
     info!("=======================================================");
 
     let _mf_guard = MfPlatformGuard::init()?;
-    let config = Config::default();
+    let config = Config::load();
+    let config_shared = Arc::new(parking_lot::Mutex::new(config.clone()));
 
     let ring_buffer = create_shared_ring_buffer(
         config.buffer_duration_hns(),
@@ -116,16 +119,17 @@ fn main() -> Result<()> {
     // Audio capture channel
     let timer = QpcTimer::new()?;
     let (audio_tx, audio_rx) = crossbeam_channel::unbounded();
-    let mut audio_capture = WasapiLoopbackCapture::spawn(
+    let audio_capture = Arc::new(parking_lot::Mutex::new(WasapiLoopbackCapture::spawn(
         timer.clone(),
         config.audio_bitrate,
         config.mic_enabled,
         config.mic_volume,
         None,
         None,
-        false,
+        config.audio_multi_track,
         audio_tx,
-    )?;
+    )?));
+    let audio_capture_worker = audio_capture.clone();
 
     // Shared egui context handle to wake up the overlay event loop from background threads
     let egui_ctx_shared: Arc<parking_lot::Mutex<Option<eframe::egui::Context>>> =
@@ -144,6 +148,7 @@ fn main() -> Result<()> {
 
     // Background Disk Writer thread with dynamic user-configured destination path
     let (dump_tx, dump_rx) = crossbeam_channel::unbounded::<(RingBufferSnapshot, PathBuf)>();
+    let save_notify_tx_writer = save_notify_tx.clone();
     let writer_handle = thread::Builder::new()
         .name("omniclip-disk-writer".to_string())
         .spawn(move || {
@@ -156,7 +161,7 @@ fn main() -> Result<()> {
                         let size_mb = std::fs::metadata(&path)
                             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
                             .unwrap_or(0.0);
-                        let _ = save_notify_tx.send((path.clone(), duration_secs, size_mb));
+                        let _ = save_notify_tx_writer.send((path.clone(), duration_secs, size_mb));
                         omni_clip::ui::show_hud_toast(path, duration_secs, size_mb);
                         if let Some(ctx) = egui_ctx_writer.lock().as_ref() {
                             ctx.request_repaint();
@@ -173,7 +178,7 @@ fn main() -> Result<()> {
     let (hotkey_tx, hotkey_raw_rx) = crossbeam_channel::bounded(16);
     let hotkey_listener = match HotkeyListener::spawn(config.hotkey_modifiers, config.hotkey_vk, hotkey_tx) {
         Ok(l) => {
-            info!("Hotkeys active: Alt+F10 (Save Replay), Alt+Z (Overlay Hub), Alt+F9 (Manual Record)");
+            info!("Hotkeys active: Alt+F10 (Save Replay), Alt+Z (Overlay Hub), Alt+F9 (Manual Record), Alt+F1 (Screenshot)");
             Some(l)
         }
         Err(e) => {
@@ -191,6 +196,11 @@ fn main() -> Result<()> {
         config.mic_volume,
         config.output_dir.clone(),
     );
+    {
+        let mut st = ui_state.write();
+        st.filename_pattern = config.filename_pattern.clone();
+        st.audio_multi_track = config.audio_multi_track;
+    }
     let (ui_action_tx, ui_action_rx) = crossbeam_channel::unbounded::<UiAction>();
 
     // Overlay-only events for egui (ToggleOverlay goes here)
@@ -223,6 +233,13 @@ fn main() -> Result<()> {
                             ctx.request_repaint();
                         }
                     }
+                    Ok(HotkeyEvent::TakeScreenshot) => {
+                        info!("Hotkey dispatch: TakeScreenshot → capture thread");
+                        let _ = ui_action_tx_hk.send(UiAction::TakeScreenshot);
+                        if let Some(ctx) = egui_ctx_hk.lock().as_ref() {
+                            ctx.request_repaint();
+                        }
+                    }
                     Ok(HotkeyEvent::ToggleOverlay) => {
                         info!("Hotkey dispatch: ToggleOverlay");
                         let is_now_visible = omni_clip::ui::toggle_overlay_visible();
@@ -247,7 +264,9 @@ fn main() -> Result<()> {
     let (capture_start_tx, capture_start_rx) = crossbeam_channel::bounded::<()>(1);
     let ring_buffer_capture = ring_buffer.clone();
     let dump_tx_capture = dump_tx.clone();
+    let save_notify_tx_capture = save_notify_tx.clone();
     let config_clone = config.clone();
+    let config_capture = config_shared.clone();
     let ui_state_clone = ui_state.clone();
     let running_capture = running.clone();
     let egui_ctx_capture = egui_ctx_shared.clone();
@@ -260,11 +279,11 @@ fn main() -> Result<()> {
 
                 let timer = QpcTimer::new()?;
                 let d3d11_context = D3D11Context::new()?;
-                let mut duplicator = DxgiDuplicator::new(d3d11_context.clone(), 0, timer.clone())?;
+                let mut duplicator = DxgiDuplicator::new(d3d11_context.clone(), config_clone.display_index, timer.clone())?;
 
                 let width = duplicator.width();
                 let height = duplicator.height();
-                let fps = config_clone.fps;
+                let mut fps = config_clone.fps;
 
                 info!("Display capture ready: {}x{} @ {} fps", width, height, fps);
                 let dev_manager = DxgiDeviceManager::new(d3d11_context.device())?;
@@ -277,10 +296,11 @@ fn main() -> Result<()> {
                     config_clone.gop_size,
                 )?;
 
-                let frame_duration_hns = config_clone.frame_duration_hns();
+                let mut frame_duration_hns = config_clone.frame_duration_hns();
                 let mut captured_frames = 0u64;
                 let mut encoded_chunks = 0u64;
                 let mut manual_session: Option<ManualRecordSession> = None;
+                let mut last_frame: Option<omni_clip::capture::CapturedFrame> = None;
 
                 while running_capture.load(Ordering::Relaxed) {
                     // Drain incoming audio packets into ring buffer and manual recording session
@@ -381,30 +401,83 @@ fn main() -> Result<()> {
                             UiAction::SetBufferDuration(secs) => {
                                 let new_hns = secs as i64 * 10_000_000i64;
                                 ring_buffer_capture.lock().set_max_duration_hns(new_hns);
+                                config_capture.lock().buffer_duration_secs = secs;
+                                let _ = config_capture.lock().save();
                             }
-                            UiAction::SetFps(fps) => {
-                                log::info!("UI SetFps: {} FPS requested", fps);
+                            UiAction::SetFps(new_fps) => {
+                                fps = new_fps;
+                                frame_duration_hns = 10_000_000i64 / new_fps as i64;
+                                config_capture.lock().fps = new_fps;
+                                let _ = config_capture.lock().save();
+                                info!("Dynamic FPS changed to {} (frame duration {} hns)", new_fps, frame_duration_hns);
                             }
                             UiAction::SetBitrate(mbps) => {
-                                log::info!("UI SetBitrate: {} Mbps requested", mbps);
+                                encoder.set_bitrate(mbps * 1_000_000);
+                                config_capture.lock().video_bitrate = mbps * 1_000_000;
+                                let _ = config_capture.lock().save();
+                                info!("Dynamic video bitrate changed to {} Mbps", mbps);
                             }
                             UiAction::ToggleMic => {
-                                log::info!("UI ToggleMic requested");
+                                let is_enabled = audio_capture_worker.lock().toggle_mic();
+                                config_capture.lock().mic_enabled = is_enabled;
+                                let _ = config_capture.lock().save();
+                                info!("Microphone dynamically toggled: {}", if is_enabled { "UNMUTED" } else { "MUTED" });
                             }
                             UiAction::SetMicVolume(vol) => {
-                                log::info!("UI SetMicVolume: {:.2} requested", vol);
+                                audio_capture_worker.lock().set_mic_volume(vol);
+                                config_capture.lock().mic_volume = vol;
+                                let _ = config_capture.lock().save();
+                                info!("Microphone dynamic volume set to: {:.2}", vol);
                             }
                             UiAction::SetOutputDir(dir) => {
-                                log::info!("UI SetOutputDir: {:?} requested", dir);
+                                config_capture.lock().output_dir = dir;
+                                let _ = config_capture.lock().save();
                             }
                             UiAction::SetFilenamePattern(pat) => {
-                                log::info!("UI SetFilenamePattern: '{}' requested", pat);
+                                config_capture.lock().filename_pattern = pat;
+                                let _ = config_capture.lock().save();
                             }
                             UiAction::SetAudioMultiTrack(multi) => {
-                                log::info!("UI SetAudioMultiTrack: {} requested", multi);
+                                config_capture.lock().audio_multi_track = multi;
+                                let _ = config_capture.lock().save();
+                            }
+                            UiAction::TakeScreenshot => {
+                                if let Some(ref frame) = last_frame {
+                                    let out_dir = config_capture.lock().output_dir.clone();
+                                    let shot_dir = out_dir.join("Screenshots");
+                                    let st = unsafe { windows::Win32::System::SystemInformation::GetLocalTime() };
+                                    let shot_filename = format!(
+                                        "Screenshot_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.bmp",
+                                        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+                                    );
+                                    let shot_path = shot_dir.join(shot_filename);
+                                    match omni_clip::capture::save_screenshot_bmp(&d3d11_context, frame, &shot_path) {
+                                        Ok(()) => {
+                                            info!(">>> SCREENSHOT SAVED: {} <<<", shot_path.display());
+                                            let size_mb = std::fs::metadata(&shot_path)
+                                                .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+                                                .unwrap_or(0.0);
+                                            let _ = save_notify_tx_capture.send((shot_path.clone(), 0, size_mb));
+                                            omni_clip::ui::show_hud_toast(shot_path.clone(), 0, size_mb);
+                                            {
+                                                let mut st = ui_state_clone.write();
+                                                st.push_toast("Скриншот сохранён", shot_path, 0, size_mb);
+                                            }
+                                            if let Some(ctx) = egui_ctx_capture.lock().as_ref() {
+                                                ctx.request_repaint();
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("Failed to save screenshot: {}", e);
+                                        }
+                                    }
+                                } else {
+                                    log::warn!("Screenshot requested, but no desktop frame has been captured yet");
+                                }
                             }
                             UiAction::QuitApplication => {
                                 running_capture.store(false, Ordering::SeqCst);
+                                omni_clip::ui::close_overlay_window();
                             }
                         }
                     }
@@ -419,6 +492,7 @@ fn main() -> Result<()> {
                     match duplicator.acquire_frame(16)? {
                         CaptureStatus::Frame(frame) => {
                             captured_frames += 1;
+                            last_frame = Some(frame.clone());
                             if let Ok(chunks) = encoder.poll_output() {
                                 let mut rb = ring_buffer_capture.lock();
                                 for chunk in chunks {
@@ -517,11 +591,26 @@ fn main() -> Result<()> {
 
     let app = OmniClipApp::new(
         ui_state,
-        ui_action_tx,
+        ui_action_tx.clone(),
         overlay_rx,
         save_notify_rx,
         running.clone(),
     );
+
+    let tray_manager = match omni_clip::ui::TrayManager::spawn(
+        ui_action_tx,
+        egui_ctx_shared.clone(),
+        running.clone(),
+    ) {
+        Ok(t) => {
+            info!("System tray notification icon initialized successfully");
+            Some(t)
+        }
+        Err(e) => {
+            log::warn!("Failed to initialize system tray icon: {}", e);
+            None
+        }
+    };
 
     let egui_ctx_init = egui_ctx_shared.clone();
     let run_res = eframe::run_native(
@@ -543,10 +632,13 @@ fn main() -> Result<()> {
 
     // Clean application shutdown
     running.store(false, Ordering::SeqCst);
+    if let Some(mut tray) = tray_manager {
+        tray.stop();
+    }
     if let Some(mut h) = hotkey_listener {
         h.stop();
     }
-    audio_capture.stop();
+    audio_capture.lock().stop();
     drop(dump_tx);
     let _ = capture_handle.join();
     let _ = writer_handle.join();

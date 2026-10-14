@@ -32,6 +32,8 @@ pub enum UiAction {
     SetFilenamePattern(String),
     /// Change multi-track audio configuration.
     SetAudioMultiTrack(bool),
+    /// Capture instant screenshot to disk (Alt+F1).
+    TakeScreenshot,
     /// Request clean application shutdown.
     QuitApplication,
 }
@@ -215,8 +217,9 @@ impl eframe::App for OmniClipApp {
             self.fonts_initialized = true;
         }
 
-        // 0. Check global stop signal (Ctrl+C / console close) — close egui window cleanly
-        if !self.running.load(std::sync::atomic::Ordering::Relaxed) {
+        // 0. Check global stop signal (Ctrl+C / console close / tray exit) — close egui window cleanly
+        if !self.running.load(std::sync::atomic::Ordering::Relaxed) || ctx.input(|i| i.viewport().close_requested()) {
+            self.running.store(false, std::sync::atomic::Ordering::SeqCst);
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
@@ -234,6 +237,8 @@ impl eframe::App for OmniClipApp {
         // 2. Check overlay visibility: if hidden, suppress rendering and enforce viewport invisibility
         if !crate::ui::is_overlay_visible() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
+            // Keep a low-frequency tick (150ms) even while hidden to react immediately to stop signals and notifications
+            ctx.request_repaint_after(std::time::Duration::from_millis(150));
             return;
         }
 

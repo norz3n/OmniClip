@@ -1,15 +1,23 @@
 use std::mem::size_of;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
 use anyhow::{anyhow, Result};
+use crossbeam_channel::Sender;
 use log::info;
-use windows::Win32::Foundation::{HWND, POINT};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, LoadIconW, SetForegroundWindow,
-    TrackPopupMenu, HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, TPM_NONOTIFY, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DispatchMessageW,
+    GetCursorPos, GetMessageW, LoadIconW, PostQuitMessage, PostThreadMessageW, RegisterClassExW,
+    SetForegroundWindow, TrackPopupMenu, HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, MSG,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WINDOW_EX_STYLE, WM_DESTROY, WM_LBUTTONDBLCLK,
+    WM_LBUTTONUP, WM_QUIT, WM_RBUTTONUP, WNDCLASSEXW, WS_OVERLAPPED,
 };
+
+use crate::ui::app::UiAction;
 
 /// Tray message ID sent back to the window proc.
 pub const WM_APP_TRAY: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 1;
@@ -27,6 +35,9 @@ pub struct TrayIcon {
     hwnd: HWND,
     added: bool,
 }
+
+unsafe impl Send for TrayIcon {}
+unsafe impl Sync for TrayIcon {}
 
 impl TrayIcon {
     /// Creates and registers a new system tray notification icon for the specified window.
@@ -121,3 +132,204 @@ impl Drop for TrayIcon {
         self.remove();
     }
 }
+
+struct TrayContext {
+    action_tx: Sender<UiAction>,
+    egui_ctx: Arc<parking_lot::Mutex<Option<eframe::egui::Context>>>,
+    running: Arc<AtomicBool>,
+    tray_icon: Option<TrayIcon>,
+}
+
+static TRAY_CTX: parking_lot::RwLock<Option<TrayContext>> = parking_lot::RwLock::new(None);
+
+unsafe extern "system" fn tray_wnd_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    match msg {
+        WM_APP_TRAY => {
+            let event = lparam.0 as u32;
+            if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+                let is_now_visible = crate::ui::toggle_overlay_visible();
+                if let Some(ctx_guard) = TRAY_CTX.read().as_ref() {
+                    if let Some(ctx) = ctx_guard.egui_ctx.lock().as_ref() {
+                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(is_now_visible));
+                        if is_now_visible {
+                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+                        }
+                        ctx.request_repaint();
+                    }
+                }
+            } else if event == WM_RBUTTONUP {
+                let mut action_to_send = None;
+                if let Some(ctx_guard) = TRAY_CTX.read().as_ref() {
+                    if let Some(ref tray) = ctx_guard.tray_icon {
+                        if let Some(cmd) = tray.show_context_menu() {
+                            match cmd {
+                                TRAY_CMD_TOGGLE_OVERLAY => {
+                                    let is_now_visible = crate::ui::toggle_overlay_visible();
+                                    if let Some(ctx) = ctx_guard.egui_ctx.lock().as_ref() {
+                                        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Visible(is_now_visible));
+                                        if is_now_visible {
+                                            ctx.send_viewport_cmd(eframe::egui::ViewportCommand::Focus);
+                                        }
+                                        ctx.request_repaint();
+                                    }
+                                }
+                                TRAY_CMD_SAVE_REPLAY => {
+                                    action_to_send = Some(UiAction::SaveReplay);
+                                }
+                                TRAY_CMD_EXIT => {
+                                    ctx_guard.running.store(false, Ordering::SeqCst);
+                                    crate::ui::close_overlay_window();
+                                    action_to_send = Some(UiAction::QuitApplication);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                if let Some(action) = action_to_send {
+                    if let Some(ctx_guard) = TRAY_CTX.read().as_ref() {
+                        let _ = ctx_guard.action_tx.send(action);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_DESTROY => {
+            if let Some(ctx_guard) = TRAY_CTX.write().as_mut() {
+                if let Some(mut tray) = ctx_guard.tray_icon.take() {
+                    tray.remove();
+                }
+            }
+            PostQuitMessage(0);
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+/// Spawns the dedicated background thread hosting the native Windows notification tray icon.
+pub struct TrayManager {
+    thread_handle: Option<JoinHandle<()>>,
+    thread_id: u32,
+}
+
+impl TrayManager {
+    /// Launches the system tray notification icon event loop on a dedicated thread.
+    pub fn spawn(
+        action_tx: Sender<UiAction>,
+        egui_ctx: Arc<parking_lot::Mutex<Option<eframe::egui::Context>>>,
+        running: Arc<AtomicBool>,
+    ) -> Result<Self> {
+        let (init_tx, init_rx) = crossbeam_channel::bounded::<Result<u32>>(1);
+
+        let handle = std::thread::Builder::new()
+            .name("omniclip-tray".to_string())
+            .spawn(move || {
+                let tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
+                let class_name = windows::core::w!("OmniClipTrayMsgWindow");
+
+                let wc = WNDCLASSEXW {
+                    cbSize: size_of::<WNDCLASSEXW>() as u32,
+                    lpfnWndProc: Some(tray_wnd_proc),
+                    lpszClassName: class_name,
+                    ..Default::default()
+                };
+
+                unsafe {
+                    let _ = RegisterClassExW(&wc);
+                }
+
+                let hwnd = match unsafe {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        class_name,
+                        windows::core::w!("OmniClipTrayHost"),
+                        WS_OVERLAPPED,
+                        0,
+                        0,
+                        0,
+                        0,
+                        HWND(std::ptr::null_mut()),
+                        None,
+                        None,
+                        None,
+                    )
+                } {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(anyhow!("Failed to create tray message window: {e}")));
+                        return;
+                    }
+                };
+
+                let tray_icon = match TrayIcon::new(hwnd, "OmniClip — Ultra-Lightweight Instant Replay") {
+                    Ok(t) => t,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(e));
+                        return;
+                    }
+                };
+
+                *TRAY_CTX.write() = Some(TrayContext {
+                    action_tx,
+                    egui_ctx,
+                    running: running.clone(),
+                    tray_icon: Some(tray_icon),
+                });
+
+                let _ = init_tx.send(Ok(tid));
+
+                let mut msg = MSG::default();
+                while running.load(Ordering::Relaxed) {
+                    let ret = unsafe { GetMessageW(&mut msg, HWND(std::ptr::null_mut()), 0, 0) };
+                    if ret.0 <= 0 || msg.message == WM_QUIT {
+                        break;
+                    }
+                    unsafe {
+                        DispatchMessageW(&msg);
+                    }
+                }
+
+                if let Some(ctx_guard) = TRAY_CTX.write().as_mut() {
+                    if let Some(mut tray) = ctx_guard.tray_icon.take() {
+                        tray.remove();
+                    }
+                }
+            })?;
+
+        let thread_id = init_rx.recv()??;
+        Ok(Self {
+            thread_handle: Some(handle),
+            thread_id,
+        })
+    }
+
+    /// Stops the tray notification thread and removes the tray icon.
+    pub fn stop(&mut self) {
+        if self.thread_id != 0 {
+            unsafe {
+                let _ = PostThreadMessageW(
+                    self.thread_id,
+                    WM_QUIT,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+            if let Some(handle) = self.thread_handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
+
+impl Drop for TrayManager {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+

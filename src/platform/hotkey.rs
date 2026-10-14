@@ -7,7 +7,7 @@ use log::{info, warn};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT, VK_F9,
+    RegisterHotKey, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_ALT, MOD_NOREPEAT, VK_F1, VK_F9,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, GetMessageW, PostThreadMessageW,
@@ -18,6 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 const OMNICLIP_HOTKEY_REPLAY_ID: i32 = 0x4F43; // 'OC' (Alt+F10)
 const OMNICLIP_HOTKEY_OVERLAY_ID: i32 = 0x4F5A; // 'OZ' (Alt+Z)
 const OMNICLIP_HOTKEY_RECORD_ID: i32 = 0x4F52;  // 'OR' (Alt+F9)
+const OMNICLIP_HOTKEY_SCREENSHOT_ID: i32 = 0x4F53; // 'OS' (Alt+F1)
 
 /// Virtual key code for ASCII 'Z'.
 const VK_KEY_Z: u32 = 0x5A;
@@ -31,6 +32,8 @@ pub enum HotkeyEvent {
     ToggleOverlay,
     /// Toggle continuous manual recording mode (Alt+F9).
     ToggleRecord,
+    /// Capture instant screenshot of current display (Alt+F1).
+    TakeScreenshot,
 }
 
 /// Global hotkey listener running a Win32 message loop on a dedicated thread.
@@ -99,10 +102,20 @@ impl HotkeyListener {
                     )
                 };
 
+                // Register global hotkey for screenshot capture (Alt+F1)
+                let _ = unsafe {
+                    RegisterHotKey(
+                        HWND(std::ptr::null_mut()),
+                        OMNICLIP_HOTKEY_SCREENSHOT_ID,
+                        MOD_ALT | MOD_NOREPEAT,
+                        VK_F1.0 as u32,
+                    )
+                };
+
                 let _ = init_tx.send(Ok(()));
                 info!(
-                    "Registered global hotkeys: Replay (0x{:X}), Overlay (0x{:X}), Record (0x{:X})",
-                    OMNICLIP_HOTKEY_REPLAY_ID, OMNICLIP_HOTKEY_OVERLAY_ID, OMNICLIP_HOTKEY_RECORD_ID
+                    "Registered global hotkeys: Replay (0x{:X}), Overlay (0x{:X}), Record (0x{:X}), Screenshot (0x{:X})",
+                    OMNICLIP_HOTKEY_REPLAY_ID, OMNICLIP_HOTKEY_OVERLAY_ID, OMNICLIP_HOTKEY_RECORD_ID, OMNICLIP_HOTKEY_SCREENSHOT_ID
                 );
 
                 let mut msg = MSG::default();
@@ -118,6 +131,7 @@ impl HotkeyListener {
                             OMNICLIP_HOTKEY_REPLAY_ID => Some(HotkeyEvent::TriggerReplay),
                             OMNICLIP_HOTKEY_OVERLAY_ID => Some(HotkeyEvent::ToggleOverlay),
                             OMNICLIP_HOTKEY_RECORD_ID => Some(HotkeyEvent::ToggleRecord),
+                            OMNICLIP_HOTKEY_SCREENSHOT_ID => Some(HotkeyEvent::TakeScreenshot),
                             _ => None,
                         };
 
@@ -140,6 +154,7 @@ impl HotkeyListener {
                     let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_REPLAY_ID);
                     let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_OVERLAY_ID);
                     let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_RECORD_ID);
+                    let _ = UnregisterHotKey(HWND(std::ptr::null_mut()), OMNICLIP_HOTKEY_SCREENSHOT_ID);
                 }
                 info!("Unregistered all global hotkeys");
             })
