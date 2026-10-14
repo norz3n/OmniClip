@@ -187,10 +187,33 @@ pub fn set_overlay_visible(visible: bool) {
 }
 
 /// Launches the native modern Windows folder picker dialog and returns the selected path.
+/// Properly parents the dialog to the overlay window so it appears in front of the topmost UI.
 pub fn pick_folder(title: Option<&str>) -> Option<std::path::PathBuf> {
     let title_owned = title.map(|s| s.to_string());
-    std::thread::spawn(move || {
+    let parent_hwnd = get_overlay_hwnd();
+
+    // Temporarily demote overlay from HWND_TOPMOST so the modal dialog is guaranteed to sit on top
+    if !parent_hwnd.0.is_null() {
         unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_NOTOPMOST, SWP_NOMOVE, SWP_NOSIZE, SWP_NOACTIVATE,
+            };
+            let _ = SetWindowPos(
+                parent_hwnd,
+                HWND_NOTOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+    let parent_hwnd_raw = parent_hwnd.0 as isize;
+
+    let result = std::thread::spawn(move || {
+        unsafe {
+            use windows::Win32::Foundation::HWND;
             use windows::Win32::System::Com::{
                 CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_INPROC_SERVER,
                 COINIT_APARTMENTTHREADED,
@@ -200,6 +223,7 @@ pub fn pick_folder(title: Option<&str>) -> Option<std::path::PathBuf> {
             };
 
             let com_init = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+            let parent_hwnd = HWND(parent_hwnd_raw as *mut _);
 
             let res = (|| -> Option<std::path::PathBuf> {
                 let dialog: IFileOpenDialog =
@@ -210,7 +234,16 @@ pub fn pick_folder(title: Option<&str>) -> Option<std::path::PathBuf> {
                 dialog
                     .SetTitle(windows::core::PCWSTR(title_u16.as_ptr()))
                     .ok()?;
-                dialog.Show(None).ok()?;
+                let owner = if !parent_hwnd.0.is_null() {
+                    parent_hwnd
+                } else {
+                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
+                };
+                if !owner.0.is_null() {
+                    dialog.Show(owner).ok()?;
+                } else {
+                    dialog.Show(None).ok()?;
+                }
                 let item = dialog.GetResult().ok()?;
                 let display_name = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
                 let path_str = display_name.to_string().ok()?;
@@ -227,7 +260,20 @@ pub fn pick_folder(title: Option<&str>) -> Option<std::path::PathBuf> {
     })
     .join()
     .ok()
-    .flatten()
+    .flatten();
+
+    // Re-promote overlay window back to HWND_TOPMOST and restore focus
+    if !parent_hwnd.0.is_null() && is_overlay_visible() {
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetForegroundWindow, SetWindowPos, HWND_TOPMOST, SWP_NOMOVE, SWP_NOSIZE,
+            };
+            let _ = SetWindowPos(parent_hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+            let _ = SetForegroundWindow(parent_hwnd);
+        }
+    }
+
+    result
 }
 
 /// Toggles the overlay window visibility and returns the new visibility state.

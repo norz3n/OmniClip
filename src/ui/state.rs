@@ -196,6 +196,8 @@ pub struct UiState {
     pub output_dir: PathBuf,
     /// Session list of recent saved replay captures.
     pub recent_replays: Vec<SavedReplayEntry>,
+    /// Session list of recent saved screenshots.
+    pub recent_screenshots: Vec<SavedReplayEntry>,
 
     /// In-game HUD corner indicator visibility.
     pub hud_visible: bool,
@@ -272,6 +274,7 @@ impl UiState {
             sound_notify_on_save: true,
             output_dir,
             recent_replays: Vec::new(),
+            recent_screenshots: Vec::new(),
             hud_visible: true,
             hub_visible: false,
             is_saving_disk: false,
@@ -313,17 +316,32 @@ impl UiState {
             duration_secs,
             size_mb,
         );
-        self.recent_replays.insert(
-            0,
-            SavedReplayEntry {
-                filepath,
-                filename: toast.filename.clone(),
-                duration_secs,
-                size_mb,
-            },
-        );
-        if self.recent_replays.len() > 10 {
-            self.recent_replays.truncate(10);
+        if duration_secs == 0 {
+            self.recent_screenshots.insert(
+                0,
+                SavedReplayEntry {
+                    filepath,
+                    filename: toast.filename.clone(),
+                    duration_secs: 0,
+                    size_mb,
+                },
+            );
+            if self.recent_screenshots.len() > 10 {
+                self.recent_screenshots.truncate(10);
+            }
+        } else {
+            self.recent_replays.insert(
+                0,
+                SavedReplayEntry {
+                    filepath,
+                    filename: toast.filename.clone(),
+                    duration_secs,
+                    size_mb,
+                },
+            );
+            if self.recent_replays.len() > 10 {
+                self.recent_replays.truncate(10);
+            }
         }
         self.active_toast = Some(toast);
     }

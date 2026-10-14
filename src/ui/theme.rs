@@ -293,6 +293,8 @@ impl M3Icon {
     pub const SETTINGS: &'static str = "\u{E713}";
     /// Globe / Language & Locale icon (U+E774).
     pub const GLOBE: &'static str = "\u{E774}";
+    /// Photo camera / Screenshot icon (U+E722).
+    pub const CAMERA: &'static str = "\u{E722}";
 }
 
 #[cfg(test)]

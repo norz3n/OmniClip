@@ -248,6 +248,10 @@ pub enum TextKey {
     MicStatusOff,
     SpeakersStatus,
     FolderPickerTitle,
+    SectionRecentScreenshots,
+    SectionRecentScreenshotsDesc,
+    NoRecentScreenshots,
+    OpenScreenshotsFolder,
 }
 
 /// Translates a `TextKey` into a static string literal for the specified language.
@@ -611,6 +615,14 @@ pub fn t(key: TextKey, lang: Language) -> &'static str {
         (TextKey::SpeakersStatus, Language::En) => "Speakers: 48kHz Stereo",
         (TextKey::FolderPickerTitle, Language::Ru) => "Выберите папку для сохранения повторов OmniClip",
         (TextKey::FolderPickerTitle, Language::En) => "Select OmniClip replay storage directory",
+        (TextKey::SectionRecentScreenshots, Language::Ru) => "История скриншотов за текущую сессию",
+        (TextKey::SectionRecentScreenshots, Language::En) => "Recent Screenshots in Current Session",
+        (TextKey::SectionRecentScreenshotsDesc, Language::Ru) => "Быстрый доступ к сохраненным снимкам экрана и открытие в Проводнике",
+        (TextKey::SectionRecentScreenshotsDesc, Language::En) => "Quick access to saved screenshots and folder shortcuts",
+        (TextKey::NoRecentScreenshots, Language::Ru) => "Пока нет сохраненных скриншотов в этой сессии. Нажмите Alt+F1 в игре!",
+        (TextKey::NoRecentScreenshots, Language::En) => "No screenshots saved in this session yet. Press Alt+F1 in-game!",
+        (TextKey::OpenScreenshotsFolder, Language::Ru) => "Папка скриншотов",
+        (TextKey::OpenScreenshotsFolder, Language::En) => "Screenshots Folder",
     }
 }
 

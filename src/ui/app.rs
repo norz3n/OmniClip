@@ -233,7 +233,11 @@ impl eframe::App for OmniClipApp {
         // 1. Drain replay save notifications from disk writer
         while let Ok((saved_path, duration_secs, size_mb)) = self.save_notify_rx.try_recv() {
             let mut st = self.state.write();
-            let toast_title = t(TextKey::ToastReplaySaved, st.language);
+            let toast_title = if duration_secs == 0 {
+                t(TextKey::ToastScreenshotSaved, st.language)
+            } else {
+                t(TextKey::ToastReplaySaved, st.language)
+            };
             st.push_toast(toast_title, saved_path, duration_secs, size_mb);
             st.is_saving_disk = false;
         }
@@ -1100,6 +1104,66 @@ impl OmniClipApp {
                     }
                 });
         });
+
+        ui.add_space(10.0);
+
+        // Section 3: Instant Screenshot Quick Bar
+        egui::Frame::NONE
+            .fill(M3Theme::EGUI_SURFACE_CONTAINER)
+            .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
+            .corner_radius(CornerRadius::same(M3Theme::RADIUS_LG_U8))
+            .inner_margin(16.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new(format!("{}  {}", M3Icon::CAMERA, t(TextKey::ActionTakeScreenshot, lang)))
+                            .color(M3Theme::EGUI_ON_SURFACE)
+                            .size(14.0)
+                            .strong(),
+                    );
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new(t(TextKey::DescTakeScreenshot, lang))
+                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                            .size(11.5),
+                    );
+
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        let shot_btn = ui.add(
+                            egui::Button::new(
+                                RichText::new(format!("{}  {} (Alt+F1)", M3Icon::CAMERA, t(TextKey::ActionTakeScreenshot, lang)))
+                                    .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
+                                    .size(12.0)
+                                    .strong(),
+                            )
+                            .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
+                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                            .min_size(Vec2::new(180.0, 32.0)),
+                        );
+                        if shot_btn.clicked() {
+                            let _ = self.action_tx.send(UiAction::TakeScreenshot);
+                        }
+
+                        ui.add_space(8.0);
+
+                        let open_shots_btn = ui.add(
+                            egui::Button::new(
+                                RichText::new(format!("{}  {}", M3Icon::FOLDER, t(TextKey::OpenScreenshotsFolder, lang)))
+                                    .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                    .size(11.5),
+                            )
+                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                            .min_size(Vec2::new(150.0, 32.0)),
+                        );
+                        if open_shots_btn.clicked() {
+                            let shot_dir = state.output_dir.join("Screenshots");
+                            let _ = std::fs::create_dir_all(&shot_dir);
+                            let _ = std::process::Command::new("explorer").arg(&shot_dir).spawn();
+                        }
+                    });
+                });
+            });
     }
 
     /// Renders Tab 2: Video & Encoding quality settings (OBS-style detailed configuration).
@@ -2021,6 +2085,24 @@ impl OmniClipApp {
                             .arg(&state.output_dir)
                             .spawn();
                     }
+
+                    ui.add_space(6.0);
+
+                    let open_shots_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(format!("{}  {}", M3Icon::CAMERA, t(TextKey::OpenScreenshotsFolder, lang)))
+                                .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                .size(11.5),
+                        )
+                        .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                        .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                        .min_size(Vec2::new(140.0, 26.0)),
+                    );
+                    if open_shots_btn.clicked() {
+                        let shot_dir = state.output_dir.join("Screenshots");
+                        let _ = std::fs::create_dir_all(&shot_dir);
+                        let _ = std::process::Command::new("explorer").arg(&shot_dir).spawn();
+                    }
                 });
 
                 ui.add_space(8.0);
@@ -2159,6 +2241,130 @@ impl OmniClipApp {
                                             if show_btn.clicked() {
                                                 let _ = std::process::Command::new("explorer")
                                                     .args(["/select,", &clip.filepath.to_string_lossy()])
+                                                    .spawn();
+                                            }
+                                        });
+                                    },
+                                );
+                            });
+                        ui.add_space(4.0);
+                    }
+                }
+            },
+        );
+
+        ui.add_space(8.0);
+
+        // Section 3: Recent Screenshots in current session
+        self.render_section_card(
+            ui,
+            &format!("{}  {}", M3Icon::CAMERA, t(TextKey::SectionRecentScreenshots, lang)),
+            Some(t(TextKey::SectionRecentScreenshotsDesc, lang)),
+            |ui| {
+                Self::row(ui, |ui| {
+                    let take_shot_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(format!("{}  {}", M3Icon::CAMERA, t(TextKey::TakeScreenshot, lang)))
+                                .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
+                                .size(11.5)
+                                .strong(),
+                        )
+                        .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
+                        .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                        .min_size(Vec2::new(190.0, 26.0)),
+                    );
+                    if take_shot_btn.clicked() {
+                        let _ = action_tx.send(UiAction::TakeScreenshot);
+                    }
+
+                    ui.add_space(8.0);
+
+                    let open_shots_dir_btn = ui.add(
+                        egui::Button::new(
+                            RichText::new(format!("{}  {}", M3Icon::FOLDER, t(TextKey::OpenScreenshotsFolder, lang)))
+                                .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                .size(11.5),
+                        )
+                        .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                        .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                        .min_size(Vec2::new(160.0, 26.0)),
+                    );
+                    if open_shots_dir_btn.clicked() {
+                        let shot_dir = state.output_dir.join("Screenshots");
+                        let _ = std::fs::create_dir_all(&shot_dir);
+                        let _ = std::process::Command::new("explorer").arg(&shot_dir).spawn();
+                    }
+                });
+
+                ui.add_space(8.0);
+
+                if state.recent_screenshots.is_empty() {
+                    ui.label(
+                        RichText::new(t(TextKey::NoRecentScreenshots, lang))
+                            .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                            .size(11.5),
+                    );
+                } else {
+                    let mb_unit = match lang { Language::Ru => "МБ", Language::En => "MB" };
+                    for shot in &state.recent_screenshots {
+                        egui::Frame::NONE
+                            .fill(M3Theme::EGUI_SURFACE_CONTAINER_HIGH)
+                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_SM_U8))
+                            .inner_margin(egui::vec2(12.0, 8.0))
+                            .show(ui, |ui| {
+                                ui.set_min_width(ui.available_width());
+                                ui.set_max_width(ui.available_width());
+                                ui.allocate_ui_with_layout(
+                                    Vec2::new(ui.available_width(), 26.0),
+                                    Layout::left_to_right(Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(M3Icon::CAMERA)
+                                                .color(M3Theme::EGUI_PRIMARY)
+                                                .size(12.5),
+                                        );
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            RichText::new(&shot.filename)
+                                                .color(M3Theme::EGUI_ON_SURFACE)
+                                                .size(12.0)
+                                                .strong(),
+                                        );
+                                        ui.add_space(6.0);
+                                        ui.label(
+                                            RichText::new("·")
+                                                .color(M3Theme::EGUI_OUTLINE)
+                                                .size(12.0),
+                                        );
+                                        ui.add_space(6.0);
+                                        egui::Frame::NONE
+                                            .fill(M3Theme::EGUI_SURFACE_CONTAINER)
+                                            .stroke(Stroke::new(1.0_f32, M3Theme::EGUI_OUTLINE_VARIANT))
+                                            .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                            .inner_margin(egui::vec2(8.0, 3.0))
+                                            .show(ui, |ui| {
+                                                ui.label(
+                                                    RichText::new(format!("{:.1} {mb_unit}", shot.size_mb))
+                                                        .color(M3Theme::EGUI_ON_SURFACE_VARIANT)
+                                                        .size(11.0),
+                                                );
+                                            });
+
+                                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                            let show_btn = ui.add(
+                                                egui::Button::new(
+                                                    RichText::new(format!("{}  {}", M3Icon::OPEN_EXTERNAL, t(TextKey::Open, lang)))
+                                                        .color(M3Theme::EGUI_ON_PRIMARY_CONTAINER)
+                                                        .size(11.5)
+                                                        .strong(),
+                                                )
+                                                .fill(M3Theme::EGUI_PRIMARY_CONTAINER)
+                                                .corner_radius(CornerRadius::same(M3Theme::RADIUS_PILL_U8))
+                                                .min_size(Vec2::new(0.0, 24.0)),
+                                            );
+                                            if show_btn.clicked() {
+                                                let _ = std::process::Command::new("explorer")
+                                                    .args(["/select,", &shot.filepath.to_string_lossy()])
                                                     .spawn();
                                             }
                                         });
