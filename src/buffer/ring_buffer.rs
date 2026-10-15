@@ -104,6 +104,20 @@ impl RingBuffer {
                 }
             }
         }
+
+        // Enforce maximum buffer duration bounds on audio to prevent unbounded growth if video capture is paused/idle
+        if let Some(latest_audio) = self.audio_chunks.back() {
+            let latest_pts = latest_audio.pts_hns + latest_audio.duration_hns;
+            let max_span = self.max_duration_hns + 20_000_000; // max_duration + 2s headroom for keyframe alignment
+            while let Some(front_audio) = self.audio_chunks.front() {
+                if latest_pts.saturating_sub(front_audio.pts_hns) > max_span {
+                    let popped = self.audio_chunks.pop_front().unwrap();
+                    self.total_bytes = self.total_bytes.saturating_sub(popped.byte_size());
+                } else {
+                    break;
+                }
+            }
+        }
     }
 
     /// Prunes old frames preserving IDR-alignment.
@@ -561,5 +575,29 @@ mod tests {
     fn test_manual_session_empty_returns_none() {
         let session = ManualRecordSession::new(PathBuf::from("test_manual.mp4"), VideoCodec::H264);
         assert!(session.finish(1920, 1080, 60, 48000, 2).is_none());
+    }
+
+    #[test]
+    fn test_audio_pruning_when_video_idle() {
+        let mut rb = RingBuffer::new(10_000_000, 1920, 1080, 60, 48000, 2); // 1s max duration
+        rb.push_video(VideoChunk {
+            is_keyframe: true,
+            pts_hns: 0,
+            dts_hns: 0,
+            duration_hns: 166_666,
+            data: vec![1, 2, 3],
+        });
+
+        // Push 10 seconds of audio chunks without new video frames
+        for i in 0..100 {
+            rb.push_audio(AudioChunk {
+                track_index: 0,
+                pts_hns: i * 1_000_000,
+                duration_hns: 1_000_000,
+                data: vec![0u8; 100],
+            });
+        }
+
+        assert!(rb.audio_count() < 40, "Audio chunks must be pruned when video is idle: got {}", rb.audio_count());
     }
 }

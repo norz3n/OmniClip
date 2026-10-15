@@ -370,12 +370,9 @@ impl H264Encoder {
 
                 let out_buffer = MFT_OUTPUT_DATA_BUFFER {
                     dwStreamID: 0,
-                    pSample: match &out_sample {
-                        Some(s) => unsafe { std::mem::transmute_copy(s) },
-                        None => unsafe { std::mem::zeroed() },
-                    },
+                    pSample: std::mem::ManuallyDrop::new(out_sample.clone()),
                     dwStatus: 0,
-                    pEvents: unsafe { std::mem::zeroed() },
+                    pEvents: std::mem::ManuallyDrop::new(None),
                 };
 
                 let mut output_buffers = [out_buffer];
@@ -384,10 +381,11 @@ impl H264Encoder {
                 match unsafe { self.transform.ProcessOutput(0, &mut output_buffers, &mut status) } {
                     Ok(()) => {
                         let sample_opt = if self.provides_samples {
-                            output_buffers[0].pSample.as_ref().cloned()
+                            std::mem::take(&mut *output_buffers[0].pSample)
                         } else {
                             out_sample
                         };
+                        let _ = std::mem::take(&mut *output_buffers[0].pEvents);
                         if let Some(s) = sample_opt {
                             if let Some(chunk) = self.sample_to_chunk(&s)? {
                                 chunks.push(chunk);
@@ -395,11 +393,15 @@ impl H264Encoder {
                         }
                     }
                     Err(e) if e.code() == MF_E_TRANSFORM_STREAM_CHANGE => {
+                        let _ = std::mem::take(&mut *output_buffers[0].pSample);
+                        let _ = std::mem::take(&mut *output_buffers[0].pEvents);
                         debug!("MFT stream change: re-applying output media type");
                         let new_type = unsafe { self.transform.GetOutputAvailableType(0, 0)? };
                         unsafe { self.transform.SetOutputType(0, &new_type, 0)? };
                     }
                     Err(e) => {
+                        let _ = std::mem::take(&mut *output_buffers[0].pSample);
+                        let _ = std::mem::take(&mut *output_buffers[0].pEvents);
                         warn!("ProcessOutput error: {}", e);
                     }
                 }
