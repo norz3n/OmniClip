@@ -128,6 +128,7 @@ fn main() -> Result<()> {
         st.hotkey_overlay_vk = config.hotkey_overlay_vk;
         st.hotkey_record_vk = config.hotkey_record_vk;
         st.hotkey_screenshot_vk = config.hotkey_screenshot_vk;
+        st.capture_cursor = config.capture_cursor;
     }
 
     let ring_buffer = create_shared_ring_buffer(
@@ -309,13 +310,18 @@ fn main() -> Result<()> {
                     st.video_codec = active_codec;
                 }
 
-                let mut duplicator = DxgiDuplicator::new(d3d11_context.clone(), config_clone.display_index, timer.clone())?;
+                let mut duplicator = DxgiDuplicator::new(
+                    d3d11_context.clone(),
+                    config_clone.display_index,
+                    timer.clone(),
+                    config_clone.capture_cursor,
+                )?;
 
                 let mut width = duplicator.width();
                 let mut height = duplicator.height();
                 let mut fps = config_clone.fps;
 
-                info!("Display capture ready: {}x{} @ {} fps (codec: {:?})", width, height, fps, active_codec);
+                info!("Display capture ready: {}x{} @ {} fps (codec: {:?}, cursor: {})", width, height, fps, active_codec, config_clone.capture_cursor);
                 let dev_manager = DxgiDeviceManager::new(d3d11_context.device())?;
                 let mut encoder = H264Encoder::new(
                     &dev_manager,
@@ -328,6 +334,8 @@ fn main() -> Result<()> {
                 )?;
 
                 let mut frame_duration_hns = config_clone.frame_duration_hns();
+                let mut min_frame_interval_hns = (frame_duration_hns - 20_000).max(0);
+                let mut last_encoded_hns = 0i64;
                 let mut captured_frames = 0u64;
                 let mut encoded_chunks = 0u64;
                 let mut manual_session: Option<ManualRecordSession> = None;
@@ -439,6 +447,7 @@ fn main() -> Result<()> {
                             UiAction::SetFps(new_fps) => {
                                 fps = new_fps;
                                 frame_duration_hns = 10_000_000i64 / new_fps as i64;
+                                min_frame_interval_hns = (frame_duration_hns - 20_000).max(0);
                                 config_capture.lock().fps = new_fps;
                                 let _ = config_capture.lock().save();
                                 info!("Dynamic FPS changed to {} (frame duration {} hns)", new_fps, frame_duration_hns);
@@ -578,6 +587,15 @@ fn main() -> Result<()> {
                                     }
                                 }
                             }
+                            UiAction::SetCaptureCursor(capture) => {
+                                info!("Capture thread: Setting mouse cursor capture to {}", capture);
+                                if let Err(e) = duplicator.set_capture_cursor(capture) {
+                                    log::error!("Failed to update capture_cursor on duplicator: {}", e);
+                                }
+                                config_capture.lock().capture_cursor = capture;
+                                let _ = config_capture.lock().save();
+                                ui_state_clone.write().capture_cursor = capture;
+                            }
                             UiAction::QuitApplication => {
                                 running_capture.store(false, Ordering::SeqCst);
                                 if let Some(ctx) = egui_ctx_capture.lock().as_ref() {
@@ -610,8 +628,16 @@ fn main() -> Result<()> {
                                     rb.push_video(chunk);
                                 }
                             }
-                            if encoder.can_feed() {
-                                let _ = encoder.feed_frame(&frame, frame_duration_hns);
+                            // Strict frame pacing: feed encoder only if target frame interval has elapsed
+                            if last_encoded_hns == 0
+                                || frame.hns_timestamp - last_encoded_hns >= min_frame_interval_hns
+                                || frame.hns_timestamp < last_encoded_hns
+                            {
+                                if encoder.can_feed() {
+                                    if encoder.feed_frame(&frame, frame_duration_hns).is_ok() {
+                                        last_encoded_hns = frame.hns_timestamp;
+                                    }
+                                }
                             }
                         }
                         CaptureStatus::Timeout => {

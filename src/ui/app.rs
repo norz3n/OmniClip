@@ -41,6 +41,8 @@ pub enum UiAction {
     SetVideoCodec(crate::buffer::chunk::VideoCodec),
     /// Change active capture display index.
     SetDisplayIndex(u32),
+    /// Toggle mouse cursor capture.
+    SetCaptureCursor(bool),
     /// Request clean application shutdown.
     QuitApplication,
 }
@@ -249,11 +251,9 @@ impl eframe::App for OmniClipApp {
             st.is_saving_disk = false;
         }
 
-        // 2. Check overlay visibility: if hidden, suppress rendering and enforce viewport invisibility
+        // 2. Check overlay visibility: if hidden, suppress rendering and let egui/OpenGL sleep completely
         if !crate::ui::is_overlay_visible() {
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-            // Keep a low-frequency tick (150ms) even while hidden to react immediately to stop signals and notifications
-            ctx.request_repaint_after(std::time::Duration::from_millis(150));
             return;
         }
 
@@ -1410,6 +1410,22 @@ impl OmniClipApp {
                         if self.render_preset_chip(ui, lbl, is_sel) {
                             self.state.write().video_b_frames = b;
                         }
+                    }
+                });
+
+                ui.add_space(8.0);
+
+                self.render_row(ui, |ui| {
+                    ui.label(RichText::new(if lang == Language::Ru { "Курсор мыши:" } else { "Mouse Cursor:" }).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let off_label = if lang == Language::Ru { "Скрыт (0% GPU)" } else { "Hidden (0% GPU)" };
+                    let on_label = if lang == Language::Ru { "Захватывать" } else { "Capture" };
+                    if self.render_preset_chip(ui, off_label, !state.capture_cursor) {
+                        self.state.write().capture_cursor = false;
+                        let _ = self.action_tx.send(UiAction::SetCaptureCursor(false));
+                    }
+                    if self.render_preset_chip(ui, on_label, state.capture_cursor) {
+                        self.state.write().capture_cursor = true;
+                        let _ = self.action_tx.send(UiAction::SetCaptureCursor(true));
                     }
                 });
             },

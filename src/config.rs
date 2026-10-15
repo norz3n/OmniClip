@@ -111,6 +111,9 @@ pub struct Config {
     /// Hotkey virtual key code for screenshot capture (e.g. F1 = 0x70).
     #[serde(default = "default_hotkey_screenshot_vk")]
     pub hotkey_screenshot_vk: u32,
+    /// Whether to render mouse cursor on captured frames (defaults to false for 0% GPU overhead).
+    #[serde(default)]
+    pub capture_cursor: bool,
 }
 
 impl Config {
@@ -134,7 +137,7 @@ impl Default for Config {
         Self {
             buffer_duration_secs: 60,
             fps: 60,
-            video_bitrate: 35_000_000,
+            video_bitrate: 20_000_000,
             gop_size: 60,
             audio_bitrate: 192_000,
             audio_sample_rate: 48_000,
@@ -152,6 +155,7 @@ impl Default for Config {
             hotkey_overlay_vk: 0x5A,
             hotkey_record_vk: VK_F9.0 as u32,
             hotkey_screenshot_vk: VK_F1.0 as u32,
+            capture_cursor: false,
         }
     }
 }
@@ -187,8 +191,13 @@ impl Config {
         let path = Self::config_path();
         if path.exists() {
             if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Ok(cfg) = toml::from_str::<Config>(&content) {
+                if let Ok(mut cfg) = toml::from_str::<Config>(&content) {
                     log::info!("Loaded configuration from '{}'", path.display());
+                    // Migrate legacy 35 Mbps default to the new 20 Mbps hardware-efficient profile
+                    if cfg.video_bitrate == 35_000_000 {
+                        cfg.video_bitrate = 20_000_000;
+                        let _ = cfg.save();
+                    }
                     return cfg;
                 }
             }

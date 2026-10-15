@@ -43,6 +43,8 @@ pub struct DxgiDuplicator {
     offset_y: i32,
     refresh_rate_numerator: u32,
     refresh_rate_denominator: u32,
+    capture_cursor: bool,
+    last_frame_hns: i64,
 }
 
 /// Detailed information about an active display monitor.
@@ -89,8 +91,17 @@ impl DxgiDuplicator {
         self.init_duplication()
     }
 
+    /// Dynamically toggles mouse cursor rendering and updates texture allocation flags accordingly.
+    pub fn set_capture_cursor(&mut self, capture_cursor: bool) -> Result<()> {
+        if self.capture_cursor != capture_cursor {
+            self.capture_cursor = capture_cursor;
+            self.init_duplication()?;
+        }
+        Ok(())
+    }
+
     /// Creates a new DxgiDuplicator for the specified output index (0 = primary display).
-    pub fn new(context: D3D11Context, output_index: u32, timer: QpcTimer) -> Result<Self> {
+    pub fn new(context: D3D11Context, output_index: u32, timer: QpcTimer, capture_cursor: bool) -> Result<Self> {
         let mut duplicator = Self {
             context,
             output_index,
@@ -104,6 +115,8 @@ impl DxgiDuplicator {
             offset_y: 0,
             refresh_rate_numerator: 60,
             refresh_rate_denominator: 1,
+            capture_cursor,
+            last_frame_hns: 0,
         };
 
         duplicator.init_duplication()?;
@@ -170,6 +183,12 @@ impl DxgiDuplicator {
 
     /// Allocates an internal Direct3D 11 texture in VRAM for zero-copy frame caching.
     fn create_gpu_texture(&self, width: u32, height: u32) -> Result<ID3D11Texture2D> {
+        let misc_flags = if self.capture_cursor {
+            windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_GDI_COMPATIBLE.0 as u32
+        } else {
+            0
+        };
+
         let desc = D3D11_TEXTURE2D_DESC {
             Width: width,
             Height: height,
@@ -183,7 +202,7 @@ impl DxgiDuplicator {
             Usage: D3D11_USAGE_DEFAULT,
             BindFlags: (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32,
             CPUAccessFlags: 0,
-            MiscFlags: windows::Win32::Graphics::Direct3D11::D3D11_RESOURCE_MISC_GDI_COMPATIBLE.0 as u32,
+            MiscFlags: misc_flags,
         };
 
         let mut texture: Option<ID3D11Texture2D> = None;
@@ -216,6 +235,13 @@ impl DxgiDuplicator {
                 let qpc_now = QpcTimer::now_qpc();
                 let hns_now = self.timer.qpc_to_hns(qpc_now);
 
+                // Deduplication: if OS produced 0 new desktop frames, release immediately and report Timeout unless 1s keepalive elapsed
+                if frame_info.AccumulatedFrames == 0 && (hns_now - self.last_frame_hns < 10_000_000) {
+                    let _ = unsafe { duplicator.ReleaseFrame() };
+                    return Ok(CaptureStatus::Timeout);
+                }
+                self.last_frame_hns = hns_now;
+
                 let resource = desktop_resource.ok_or_else(|| {
                     anyhow!("AcquireNextFrame succeeded but returned no resource")
                 })?;
@@ -240,23 +266,28 @@ impl DxgiDuplicator {
                     warn!("ReleaseFrame returned error: {}", e);
                 }
 
-                // Render hardware mouse cursor directly onto the captured VRAM frame
-                if let Ok(surface) = dst_texture.cast::<windows::Win32::Graphics::Dxgi::IDXGISurface1>() {
-                    if let Ok(hdc) = unsafe { surface.GetDC(false) } {
-                        unsafe {
-                            use windows::Win32::UI::WindowsAndMessaging::{
-                                DrawIconEx, GetCursorInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
-                            };
-                            let mut ci = CURSORINFO {
-                                cbSize: std::mem::size_of::<CURSORINFO>() as u32,
-                                ..Default::default()
-                            };
-                            if GetCursorInfo(&mut ci).is_ok() && (ci.flags.0 & CURSOR_SHOWING.0) != 0 {
-                                let x = ci.ptScreenPos.x - self.offset_x;
-                                let y = ci.ptScreenPos.y - self.offset_y;
-                                let _ = DrawIconEx(hdc, x, y, ci.hCursor, 0, 0, 0, None, DI_NORMAL);
+                // Render hardware mouse cursor only when enabled, avoiding full-surface GDI pipeline flushes
+                if self.capture_cursor {
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            DrawIconEx, GetCursorInfo, CURSORINFO, CURSOR_SHOWING, DI_NORMAL,
+                        };
+                        let mut ci = CURSORINFO {
+                            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+                            ..Default::default()
+                        };
+                        // Check cursor visibility in user-mode memory before touching D3D11/GDI
+                        if GetCursorInfo(&mut ci).is_ok() && (ci.flags.0 & CURSOR_SHOWING.0) != 0 {
+                            let x = ci.ptScreenPos.x - self.offset_x;
+                            let y = ci.ptScreenPos.y - self.offset_y;
+                            if x >= 0 && x < self.width as i32 && y >= 0 && y < self.height as i32 {
+                                if let Ok(surface) = dst_texture.cast::<windows::Win32::Graphics::Dxgi::IDXGISurface1>() {
+                                    if let Ok(hdc) = surface.GetDC(false) {
+                                        let _ = DrawIconEx(hdc, x, y, ci.hCursor, 0, 0, 0, None, DI_NORMAL);
+                                        let _ = surface.ReleaseDC(None);
+                                    }
+                                }
                             }
-                            let _ = surface.ReleaseDC(None);
                         }
                     }
                 }

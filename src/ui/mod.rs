@@ -589,7 +589,11 @@ fn run_hud_toast_loop(rx: crossbeam_channel::Receiver<HudToastData>) {
                 DispatchMessageW(&msg);
             }
 
-            std::thread::sleep(Duration::from_millis(16));
+            let sleep_dur = match anim_state {
+                AnimState::Idle => Duration::from_millis(200),
+                _ => Duration::from_millis(16),
+            };
+            std::thread::sleep(sleep_dur);
         }
     }
 }

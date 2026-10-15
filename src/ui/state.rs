@@ -226,6 +226,8 @@ pub struct UiState {
     pub hotkey_record_vk: u32,
     /// Hotkey virtual key code for screenshot capture (e.g. F1 = 0x70).
     pub hotkey_screenshot_vk: u32,
+    /// Whether mouse cursor capture is enabled.
+    pub capture_cursor: bool,
 }
 
 impl UiState {
@@ -302,6 +304,7 @@ impl UiState {
             hotkey_overlay_vk: 0x5A,
             hotkey_record_vk: windows::Win32::UI::Input::KeyboardAndMouse::VK_F9.0 as u32,
             hotkey_screenshot_vk: windows::Win32::UI::Input::KeyboardAndMouse::VK_F1.0 as u32,
+            capture_cursor: false,
         }
     }
 

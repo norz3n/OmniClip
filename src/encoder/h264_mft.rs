@@ -133,8 +133,25 @@ impl H264Encoder {
                 let _ = attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1);
             }
             if let Ok(codec_api) = transform.cast::<windows::Win32::Media::MediaFoundation::ICodecAPI>() {
-                let var = windows::core::VARIANT::from(gop_size);
-                let _ = codec_api.SetValue(&windows::Win32::Media::MediaFoundation::CODECAPI_AVEncMPVGOPSize, &var);
+                // Keyframe GOP interval
+                let var_gop = windows::core::VARIANT::from(gop_size);
+                let _ = codec_api.SetValue(&windows::Win32::Media::MediaFoundation::CODECAPI_AVEncMPVGOPSize, &var_gop);
+
+                // Initial target bitrate
+                let var_bitrate = windows::core::VARIANT::from(bitrate);
+                let _ = codec_api.SetValue(&windows::Win32::Media::MediaFoundation::CODECAPI_AVEncCommonMeanBitRate, &var_bitrate);
+
+                // Speed / Low-Power mode: TargetUsage 7 on QuickSync (0% 3D EU load, pure fixed-function ASIC)
+                let var_speed = windows::core::VARIANT::from(0u32);
+                let _ = codec_api.SetValue(&windows::Win32::Media::MediaFoundation::CODECAPI_AVEncCommonQualityVsSpeed, &var_speed);
+
+                // Disable B-frames: eliminates bi-directional motion estimation computation and lookahead
+                let var_b_frames = windows::core::VARIANT::from(0u32);
+                let _ = codec_api.SetValue(&windows::Win32::Media::MediaFoundation::CODECAPI_AVEncMPVDefaultBPictureCount, &var_b_frames);
+
+                // Constant Bitrate mode (CBR)
+                let var_rc = windows::core::VARIANT::from(windows::Win32::Media::MediaFoundation::eAVEncCommonRateControlMode_CBR.0 as u32);
+                let _ = codec_api.SetValue(&windows::Win32::Media::MediaFoundation::CODECAPI_AVEncCommonRateControlMode, &var_rc);
             }
         }
 
