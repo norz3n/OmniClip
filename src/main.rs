@@ -82,7 +82,28 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> BOOL {
     }
 }
 
+#[link(name = "winmm")]
+extern "system" {
+    fn timeBeginPeriod(uPeriod: u32) -> u32;
+    fn timeEndPeriod(uPeriod: u32) -> u32;
+}
+
+struct TimerPeriodGuard;
+impl Drop for TimerPeriodGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = timeEndPeriod(1);
+        }
+    }
+}
+
 fn main() -> Result<()> {
+    // Enforce 1ms multimedia timer resolution so audio capture sleeps and timeouts are accurate
+    unsafe {
+        let _ = timeBeginPeriod(1);
+    }
+    let _timer_guard = TimerPeriodGuard;
+
     // Record main Win32 thread ID for console handler dispatch
     let main_tid = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
     MAIN_THREAD_ID.store(main_tid, Ordering::SeqCst);
@@ -335,7 +356,9 @@ fn main() -> Result<()> {
 
                 let mut frame_duration_hns = config_clone.frame_duration_hns();
                 let mut min_frame_interval_hns = (frame_duration_hns - 20_000).max(0);
+                let mut gop_duration_hns = (config_clone.gop_size as i64 * 10_000_000) / fps.max(1) as i64;
                 let mut last_encoded_hns = 0i64;
+                let mut last_keyframe_hns = 0i64;
                 let mut captured_frames = 0u64;
                 let mut encoded_chunks = 0u64;
                 let mut manual_session: Option<ManualRecordSession> = None;
@@ -448,6 +471,7 @@ fn main() -> Result<()> {
                                 fps = new_fps;
                                 frame_duration_hns = 10_000_000i64 / new_fps as i64;
                                 min_frame_interval_hns = (frame_duration_hns - 20_000).max(0);
+                                gop_duration_hns = (config_capture.lock().gop_size as i64 * 10_000_000) / new_fps.max(1) as i64;
                                 config_capture.lock().fps = new_fps;
                                 let _ = config_capture.lock().save();
                                 info!("Dynamic FPS changed to {} (frame duration {} hns)", new_fps, frame_duration_hns);
@@ -621,12 +645,19 @@ fn main() -> Result<()> {
                             if let Ok(chunks) = encoder.poll_output() {
                                 let mut rb = ring_buffer_capture.lock();
                                 for chunk in chunks {
+                                    if chunk.is_keyframe {
+                                        last_keyframe_hns = chunk.pts_hns;
+                                    }
                                     encoded_chunks += 1;
                                     if let Some(ref mut session) = manual_session {
                                         session.push_video(chunk.clone());
                                     }
                                     rb.push_video(chunk);
                                 }
+                            }
+                            // Regular IDR keyframe cadence: request keyframe if GOP interval elapsed in wall-clock time
+                            if last_keyframe_hns == 0 || frame.hns_timestamp.saturating_sub(last_keyframe_hns) >= gop_duration_hns {
+                                encoder.request_keyframe();
                             }
                             // Strict frame pacing: feed encoder only if target frame interval has elapsed
                             if last_encoded_hns == 0
@@ -644,6 +675,9 @@ fn main() -> Result<()> {
                             if let Ok(chunks) = encoder.poll_output() {
                                 let mut rb = ring_buffer_capture.lock();
                                 for chunk in chunks {
+                                    if chunk.is_keyframe {
+                                        last_keyframe_hns = chunk.pts_hns;
+                                    }
                                     encoded_chunks += 1;
                                     if let Some(ref mut session) = manual_session {
                                         session.push_video(chunk.clone());

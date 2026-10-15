@@ -109,12 +109,20 @@ impl RingBuffer {
         if let Some(latest_audio) = self.audio_chunks.back() {
             let latest_pts = latest_audio.pts_hns + latest_audio.duration_hns;
             let max_span = self.max_duration_hns + 20_000_000; // max_duration + 2s headroom for keyframe alignment
-            while let Some(front_audio) = self.audio_chunks.front() {
-                if latest_pts.saturating_sub(front_audio.pts_hns) > max_span {
-                    let popped = self.audio_chunks.pop_front().unwrap();
-                    self.total_bytes = self.total_bytes.saturating_sub(popped.byte_size());
-                } else {
-                    break;
+            let should_prune_audio = if let Some(first_video) = self.video_chunks.front() {
+                latest_pts.saturating_sub(first_video.pts_hns) > max_span
+            } else {
+                true
+            };
+
+            if should_prune_audio {
+                while let Some(front_audio) = self.audio_chunks.front() {
+                    if latest_pts.saturating_sub(front_audio.pts_hns) > max_span {
+                        let popped = self.audio_chunks.pop_front().unwrap();
+                        self.total_bytes = self.total_bytes.saturating_sub(popped.byte_size());
+                    } else {
+                        break;
+                    }
                 }
             }
         }

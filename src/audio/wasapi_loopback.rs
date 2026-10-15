@@ -338,6 +338,7 @@ impl WasapiLoopbackCapture {
 
                 let mut pcm_buffer = Vec::<u8>::with_capacity(8192);
                 let mut next_pts_hns = timer.elapsed_hns();
+                let mut last_real_packet_hns = next_pts_hns;
                 let mut resample_phase = 0.0f64;
 
                 let mut mic_fifo = std::collections::VecDeque::<(f32, f32)>::with_capacity(4800);
@@ -424,10 +425,11 @@ impl WasapiLoopbackCapture {
                         }
                     };
 
-                    // Silence gap-filler: when no loopback audio is playing, synthesize silence chunks and mix mic voice
+                    // Silence gap-filler: when no loopback audio has arrived for >50ms, synthesize silence chunks and mix mic voice
                     if packet_size == 0 {
                         let now_hns = timer.elapsed_hns();
-                        if now_hns >= next_pts_hns + SILENCE_DURATION_HNS {
+                        // Only declare silence if no real audio packet has arrived for at least 50 ms (grace period)
+                        if now_hns.saturating_sub(last_real_packet_hns) >= 500_000 && now_hns >= next_pts_hns + SILENCE_DURATION_HNS {
                             pcm_buffer.clear();
                             let mut mic_pcm_buffer = Vec::<u8>::with_capacity(SILENCE_CHUNK_FRAMES * 4);
                             for _ in 0..SILENCE_CHUNK_FRAMES {
@@ -474,7 +476,7 @@ impl WasapiLoopbackCapture {
 
                             next_pts_hns += SILENCE_DURATION_HNS;
                         } else {
-                            thread::sleep(std::time::Duration::from_millis(5));
+                            thread::sleep(std::time::Duration::from_millis(2));
                         }
                         continue;
                     }
@@ -502,44 +504,41 @@ impl WasapiLoopbackCapture {
                         }
 
                         if num_frames > 0 {
+                            let now_hns = timer.elapsed_hns();
+                            last_real_packet_hns = now_hns;
+
                             let raw_pts = if qpc_pos > 0 {
                                 timer.qpc_to_hns(qpc_pos as i64)
                             } else {
-                                timer.elapsed_hns()
+                                now_hns
                             };
 
-                            // Bridge any gap between previous packet and current raw_pts with silence (+ mic)
-                            while next_pts_hns + SILENCE_DURATION_HNS <= raw_pts {
-                                pcm_buffer.clear();
-                                let mut mic_pcm_buffer = Vec::<u8>::with_capacity(SILENCE_CHUNK_FRAMES * 4);
-                                for _ in 0..SILENCE_CHUNK_FRAMES {
-                                    let (mic_l, mic_r) = mic_fifo.pop_front().unwrap_or((0.0, 0.0));
-                                    if mic_encoder_opt.is_some() {
-                                        pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
-                                        pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
-                                        let m_l = ((mic_l * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
-                                        let m_r = ((mic_r * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
-                                        mic_pcm_buffer.extend_from_slice(&m_l.to_le_bytes());
-                                        mic_pcm_buffer.extend_from_slice(&m_r.to_le_bytes());
-                                    } else {
-                                        let mix_l = (mic_l * cur_mic_volume).clamp(-1.0, 1.0);
-                                        let mix_r = (mic_r * cur_mic_volume).clamp(-1.0, 1.0);
-                                        let s_l = (mix_l * 32767.0) as i16;
-                                        let s_r = (mix_r * 32767.0) as i16;
-                                        pcm_buffer.extend_from_slice(&s_l.to_le_bytes());
-                                        pcm_buffer.extend_from_slice(&s_r.to_le_bytes());
-                                    }
-                                }
-                                if let Ok(chunks) = encoder.encode_pcm_with_track(&pcm_buffer, next_pts_hns, SILENCE_DURATION_HNS, 0) {
-                                    for chunk in chunks {
-                                        if chunk_sender.send(chunk).is_err() {
-                                            running_clone.store(false, Ordering::SeqCst);
-                                            break;
+                            let is_discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0;
+
+                            // Bridge any gap between previous packet and current raw_pts with silence (+ mic) if stream was idle
+                            if is_discontinuity || raw_pts > next_pts_hns + 200_000 {
+                                while next_pts_hns + SILENCE_DURATION_HNS <= raw_pts {
+                                    pcm_buffer.clear();
+                                    let mut mic_pcm_buffer = Vec::<u8>::with_capacity(SILENCE_CHUNK_FRAMES * 4);
+                                    for _ in 0..SILENCE_CHUNK_FRAMES {
+                                        let (mic_l, mic_r) = mic_fifo.pop_front().unwrap_or((0.0, 0.0));
+                                        if mic_encoder_opt.is_some() {
+                                            pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
+                                            pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
+                                            let m_l = ((mic_l * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                            let m_r = ((mic_r * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                            mic_pcm_buffer.extend_from_slice(&m_l.to_le_bytes());
+                                            mic_pcm_buffer.extend_from_slice(&m_r.to_le_bytes());
+                                        } else {
+                                            let mix_l = (mic_l * cur_mic_volume).clamp(-1.0, 1.0);
+                                            let mix_r = (mic_r * cur_mic_volume).clamp(-1.0, 1.0);
+                                            let s_l = (mix_l * 32767.0) as i16;
+                                            let s_r = (mix_r * 32767.0) as i16;
+                                            pcm_buffer.extend_from_slice(&s_l.to_le_bytes());
+                                            pcm_buffer.extend_from_slice(&s_r.to_le_bytes());
                                         }
                                     }
-                                }
-                                if let Some(ref mut mic_enc) = mic_encoder_opt {
-                                    if let Ok(chunks) = mic_enc.encode_pcm_with_track(&mic_pcm_buffer, next_pts_hns, SILENCE_DURATION_HNS, 1) {
+                                    if let Ok(chunks) = encoder.encode_pcm_with_track(&pcm_buffer, next_pts_hns, SILENCE_DURATION_HNS, 0) {
                                         for chunk in chunks {
                                             if chunk_sender.send(chunk).is_err() {
                                                 running_clone.store(false, Ordering::SeqCst);
@@ -547,11 +546,26 @@ impl WasapiLoopbackCapture {
                                             }
                                         }
                                     }
+                                    if let Some(ref mut mic_enc) = mic_encoder_opt {
+                                        if let Ok(chunks) = mic_enc.encode_pcm_with_track(&mic_pcm_buffer, next_pts_hns, SILENCE_DURATION_HNS, 1) {
+                                            for chunk in chunks {
+                                                if chunk_sender.send(chunk).is_err() {
+                                                    running_clone.store(false, Ordering::SeqCst);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    next_pts_hns += SILENCE_DURATION_HNS;
                                 }
-                                next_pts_hns += SILENCE_DURATION_HNS;
                             }
 
-                            let pts_hns = next_pts_hns.max(raw_pts);
+                            // For contiguous streaming, preserve uninterrupted PTS to eliminate AAC MDCT window clicks
+                            let pts_hns = if (raw_pts - next_pts_hns).abs() > 500_000 {
+                                raw_pts
+                            } else {
+                                next_pts_hns
+                            };
                             let is_silent = (flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
 
                             pcm_buffer.clear();
@@ -1009,5 +1023,38 @@ mod tests {
         let active = scan_active_audio_sessions();
         let sessions = enumerate_audio_sessions();
         assert_eq!(active.len(), sessions.len());
+    }
+
+    #[test]
+    fn test_audio_stream_timestamp_continuity() {
+        // Simulates the loop pacing algorithm to ensure zero PTS jitter under fluctuating QPC arrivals
+        let frame_duration_hns = 100_000i64; // 10ms
+        let mut next_pts_hns = 1_000_000i64;
+        let mut emitted_pts = Vec::new();
+
+        // 50 packets arriving with +/- 2ms QPC jitter
+        for i in 0..50 {
+            let jitter = ((i % 5) as i64 - 2) * 20_000; // -4ms to +4ms jitter
+            let raw_pts = 1_000_000i64 + i * frame_duration_hns + jitter;
+
+            let pts_hns = if (raw_pts - next_pts_hns).abs() > 500_000 {
+                raw_pts
+            } else {
+                next_pts_hns
+            };
+
+            emitted_pts.push(pts_hns);
+            next_pts_hns = pts_hns + frame_duration_hns;
+        }
+
+        // Verify all 50 packets are strictly contiguous without a single microsecond gap or jump
+        for i in 1..emitted_pts.len() {
+            assert_eq!(
+                emitted_pts[i],
+                emitted_pts[i - 1] + frame_duration_hns,
+                "Packet {} PTS desynchronized from contiguous timeline",
+                i
+            );
+        }
     }
 }

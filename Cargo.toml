@@ -1,6 +1,6 @@
 [package]
 name = "omni_clip"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 authors = ["OmniClip Team"]
 description = "Ultra-lightweight instant replay system for Windows in Rust"

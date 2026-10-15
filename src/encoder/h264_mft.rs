@@ -400,6 +400,7 @@ impl H264Encoder {
                         let sample_opt = if self.provides_samples {
                             std::mem::take(&mut *output_buffers[0].pSample)
                         } else {
+                            let _ = std::mem::take(&mut *output_buffers[0].pSample);
                             out_sample
                         };
                         let _ = std::mem::take(&mut *output_buffers[0].pEvents);

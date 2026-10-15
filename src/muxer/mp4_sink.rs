@@ -157,8 +157,8 @@ impl Mp4Muxer {
         let v_len = snapshot.video_chunks.len();
         let a_len = snapshot.audio_chunks.len();
 
-        // Skip any audio preceding base_pts
-        while a_idx < a_len && snapshot.audio_chunks[a_idx].pts_hns < base_pts {
+        // Skip only audio chunks that completely precede base_pts
+        while a_idx < a_len && snapshot.audio_chunks[a_idx].pts_hns + snapshot.audio_chunks[a_idx].duration_hns <= base_pts {
             a_idx += 1;
         }
 
