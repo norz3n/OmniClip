@@ -150,6 +150,7 @@ fn main() -> Result<()> {
         st.hotkey_record_vk = config.hotkey_record_vk;
         st.hotkey_screenshot_vk = config.hotkey_screenshot_vk;
         st.capture_cursor = config.capture_cursor;
+        st.audio_sync_offset_ms = config.audio_sync_offset_ms;
     }
 
     let ring_buffer = create_shared_ring_buffer(
@@ -173,6 +174,7 @@ fn main() -> Result<()> {
         None,
         None,
         config.audio_multi_track,
+        config.audio_sync_offset_ms,
         audio_tx,
     )?));
     let audio_capture_worker = audio_capture.clone();
@@ -312,6 +314,7 @@ fn main() -> Result<()> {
     let ui_state_clone = ui_state.clone();
     let running_capture = running.clone();
     let egui_ctx_capture = egui_ctx_shared.clone();
+    let timer_capture = timer.clone();
 
     let capture_handle = thread::Builder::new()
         .name("omniclip-capture".to_string())
@@ -319,7 +322,7 @@ fn main() -> Result<()> {
             let res: Result<()> = (|| {
                 let _ = capture_start_rx.recv(); // wait for eframe GL context to be ready
 
-                let timer = QpcTimer::new()?;
+                let timer = timer_capture;
                 let d3d11_context = D3D11Context::new()?;
                 let displays = DxgiDuplicator::enumerate_adapter_displays(&d3d11_context);
                 info!("DXGI: Found {} connected display outputs", displays.len());
@@ -505,6 +508,12 @@ fn main() -> Result<()> {
                             UiAction::SetAudioMultiTrack(multi) => {
                                 config_capture.lock().audio_multi_track = multi;
                                 let _ = config_capture.lock().save();
+                            }
+                            UiAction::SetAudioSyncOffset(offset_ms) => {
+                                audio_capture_worker.lock().set_sync_offset_ms(offset_ms);
+                                config_capture.lock().audio_sync_offset_ms = offset_ms;
+                                let _ = config_capture.lock().save();
+                                info!("Audio sync offset dynamically set to {} ms", offset_ms);
                             }
                             UiAction::SetLanguage(code) => {
                                 config_capture.lock().language = code;

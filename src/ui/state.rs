@@ -162,6 +162,8 @@ pub struct UiState {
     pub audio_channels: String,
     /// Whether to record game and microphone into separate audio tracks.
     pub audio_multi_track: bool,
+    /// Audio synchronization offset in milliseconds.
+    pub audio_sync_offset_ms: i32,
     /// Selected audio playback endpoint ID ("default" for system default).
     pub selected_playback_device: String,
     /// Selected audio recording endpoint ID ("default" for system default).
@@ -275,6 +277,7 @@ impl UiState {
             audio_sample_rate_hz: 48000,
             audio_channels: "Стерео (2.0)".to_string(),
             audio_multi_track: false,
+            audio_sync_offset_ms: 0,
             selected_playback_device: "default".to_string(),
             selected_capture_device: "default".to_string(),
             available_playback_devices: Vec::new(),

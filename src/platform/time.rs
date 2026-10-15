@@ -70,9 +70,33 @@ impl QpcTimer {
         ((ticks as i128 * 10_000_000i128) / frequency as i128) as i64
     }
 
+    /// Converts an absolute 100-nanosecond QPC timestamp (such as from WASAPI GetBuffer)
+    /// to relative HNS from the timer start.
+    #[inline]
+    pub fn wasapi_hns_to_relative(&self, wasapi_qpc_hns: i64) -> i64 {
+        let start_hns = Self::ticks_to_hns(self.start_qpc, self.frequency);
+        wasapi_qpc_hns.saturating_sub(start_hns).max(0)
+    }
+
     /// Returns elapsed time in HNS from timer initialization.
     #[inline]
     pub fn elapsed_hns(&self) -> i64 {
         self.qpc_to_hns(Self::now_qpc())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_wasapi_hns_to_relative() {
+        let timer = QpcTimer {
+            frequency: 10_000_000,
+            start_qpc: 1_000_000,
+        };
+        // At 10 MHz, 1 tick = 100ns (1 HNS)
+        assert_eq!(timer.wasapi_hns_to_relative(1_500_000), 500_000);
+        assert_eq!(timer.wasapi_hns_to_relative(500_000), 0); // saturating_sub
     }
 }

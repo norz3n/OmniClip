@@ -165,6 +165,8 @@ pub enum TextKey {
     ChannelMono,
     MultiTrackAudio,
     MultiTrackAudioDesc,
+    AudioSyncOffset,
+    AudioSyncOffsetDesc,
 
     // Hotkeys Tab
     SectionHotkeys,
@@ -475,6 +477,10 @@ pub fn t(key: TextKey, lang: Language) -> &'static str {
         (TextKey::MultiTrackAudio, Language::En) => "Separate Audio Tracks in MP4",
         (TextKey::MultiTrackAudioDesc, Language::Ru) => "Дорожка 1 = Игра / Система, Дорожка 2 = Микрофон (отдельные дорожки для Premiere / DaVinci Resolve)",
         (TextKey::MultiTrackAudioDesc, Language::En) => "Track 1 = Game / System, Track 2 = Microphone (separate tracks for Premiere / DaVinci Resolve)",
+        (TextKey::AudioSyncOffset, Language::Ru) => "Смещение звука (A/V Синхронизация):",
+        (TextKey::AudioSyncOffset, Language::En) => "Audio Sync Offset (A/V Sync):",
+        (TextKey::AudioSyncOffsetDesc, Language::Ru) => "Компенсация задержки звука между игрой/видео и звуковой картой (миллисекунды)",
+        (TextKey::AudioSyncOffsetDesc, Language::En) => "Compensate for audio delay between video scanout and audio output (milliseconds)",
 
         // Hotkeys Tab
         (TextKey::SectionHotkeys, Language::Ru) => "Глобальные комбинации клавиш",

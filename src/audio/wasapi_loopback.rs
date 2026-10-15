@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use anyhow::{anyhow, Result};
@@ -107,6 +107,7 @@ pub struct WasapiLoopbackCapture {
     running: Arc<AtomicBool>,
     mic_enabled: Arc<AtomicBool>,
     mic_volume: Arc<parking_lot::Mutex<f32>>,
+    sync_offset_hns: Arc<AtomicI64>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
@@ -120,6 +121,7 @@ impl WasapiLoopbackCapture {
     /// * `playback_device_id`: Optional specific audio playback endpoint ID ("default" for system default).
     /// * `capture_device_id`: Optional specific audio recording endpoint ID ("default" for system default).
     /// * `multi_track`: Whether to emit separate audio tracks (Track 0 = Desktop, Track 1 = Mic).
+    /// * `sync_offset_ms`: Audio synchronization offset in milliseconds (negative shifts audio earlier).
     /// * `chunk_sender`: Crossbeam channel sender delivering compressed AAC chunks.
     pub fn spawn(
         timer: QpcTimer,
@@ -129,6 +131,7 @@ impl WasapiLoopbackCapture {
         playback_device_id: Option<String>,
         capture_device_id: Option<String>,
         multi_track: bool,
+        sync_offset_ms: i32,
         chunk_sender: Sender<AudioChunk>,
     ) -> Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
@@ -138,6 +141,9 @@ impl WasapiLoopbackCapture {
         let mic_volume_arc = Arc::new(parking_lot::Mutex::new(mic_volume));
         let mic_enabled_thread = mic_enabled_arc.clone();
         let mic_volume_thread = mic_volume_arc.clone();
+
+        let sync_offset_hns = Arc::new(AtomicI64::new(sync_offset_ms as i64 * 10_000));
+        let sync_offset_hns_thread = sync_offset_hns.clone();
 
         let (init_tx, init_rx) = crossbeam_channel::bounded::<Result<()>>(1);
 
@@ -223,6 +229,14 @@ impl WasapiLoopbackCapture {
                     }
 
                     let aac_encoder = AacEncoder::new(TARGET_SAMPLE_RATE, TARGET_CHANNELS, target_bitrate)?;
+
+                    if let Ok(stream_latency_hns) = unsafe { audio_client.GetStreamLatency() } {
+                        info!(
+                            "WASAPI Loopback stream latency: {} hns ({:.2} ms)",
+                            stream_latency_hns,
+                            stream_latency_hns as f64 / 10_000.0
+                        );
+                    }
 
                     info!(
                         "Initialized WASAPI Loopback capture: device {} Hz, {} channels, {} bit (Float: {}), normalized to {} Hz Stereo",
@@ -337,7 +351,8 @@ impl WasapiLoopbackCapture {
                 };
 
                 let mut pcm_buffer = Vec::<u8>::with_capacity(8192);
-                let mut next_pts_hns = timer.elapsed_hns();
+                let initial_offset_hns = sync_offset_hns_thread.load(Ordering::Relaxed);
+                let mut next_pts_hns = (timer.elapsed_hns() + initial_offset_hns).max(0);
                 let mut last_real_packet_hns = next_pts_hns;
                 let mut resample_phase = 0.0f64;
 
@@ -428,8 +443,10 @@ impl WasapiLoopbackCapture {
                     // Silence gap-filler: when no loopback audio has arrived for >50ms, synthesize silence chunks and mix mic voice
                     if packet_size == 0 {
                         let now_hns = timer.elapsed_hns();
+                        let cur_offset_hns = sync_offset_hns_thread.load(Ordering::Relaxed);
+                        let adj_now_hns = (now_hns + cur_offset_hns).max(0);
                         // Only declare silence if no real audio packet has arrived for at least 50 ms (grace period)
-                        if now_hns.saturating_sub(last_real_packet_hns) >= 500_000 && now_hns >= next_pts_hns + SILENCE_DURATION_HNS {
+                        if now_hns.saturating_sub(last_real_packet_hns) >= 500_000 && adj_now_hns >= next_pts_hns + SILENCE_DURATION_HNS {
                             pcm_buffer.clear();
                             let mut mic_pcm_buffer = Vec::<u8>::with_capacity(SILENCE_CHUNK_FRAMES * 4);
                             for _ in 0..SILENCE_CHUNK_FRAMES {
@@ -507,17 +524,19 @@ impl WasapiLoopbackCapture {
                             let now_hns = timer.elapsed_hns();
                             last_real_packet_hns = now_hns;
 
+                            let cur_offset_hns = sync_offset_hns_thread.load(Ordering::Relaxed);
                             let raw_pts = if qpc_pos > 0 {
-                                timer.qpc_to_hns(qpc_pos as i64)
+                                timer.wasapi_hns_to_relative(qpc_pos as i64)
                             } else {
                                 now_hns
                             };
+                            let adj_raw_pts = (raw_pts + cur_offset_hns).max(0);
 
                             let is_discontinuity = (flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY.0 as u32) != 0;
 
                             // Bridge any gap between previous packet and current raw_pts with silence (+ mic) if stream was idle
-                            if is_discontinuity || raw_pts > next_pts_hns + 200_000 {
-                                while next_pts_hns + SILENCE_DURATION_HNS <= raw_pts {
+                            if is_discontinuity || adj_raw_pts > next_pts_hns + 200_000 {
+                                while next_pts_hns + SILENCE_DURATION_HNS <= adj_raw_pts {
                                     pcm_buffer.clear();
                                     let mut mic_pcm_buffer = Vec::<u8>::with_capacity(SILENCE_CHUNK_FRAMES * 4);
                                     for _ in 0..SILENCE_CHUNK_FRAMES {
@@ -561,8 +580,8 @@ impl WasapiLoopbackCapture {
                             }
 
                             // For contiguous streaming, preserve uninterrupted PTS to eliminate AAC MDCT window clicks
-                            let pts_hns = if (raw_pts - next_pts_hns).abs() > 500_000 {
-                                raw_pts
+                            let pts_hns = if (adj_raw_pts - next_pts_hns).abs() > 500_000 {
+                                adj_raw_pts
                             } else {
                                 next_pts_hns
                             };
@@ -704,8 +723,14 @@ impl WasapiLoopbackCapture {
             running,
             mic_enabled: mic_enabled_arc,
             mic_volume: mic_volume_arc,
+            sync_offset_hns,
             thread_handle: Some(handle),
         })
+    }
+
+    /// Dynamically sets the audio synchronization offset in milliseconds.
+    pub fn set_sync_offset_ms(&self, offset_ms: i32) {
+        self.sync_offset_hns.store(offset_ms as i64 * 10_000, Ordering::Relaxed);
     }
 
     /// Dynamically sets the microphone recording volume multiplier.
@@ -1056,5 +1081,21 @@ mod tests {
                 i
             );
         }
+    }
+
+    #[test]
+    fn test_audio_sync_offset_compensation() {
+        let offset_ms: i32 = -50; // -50ms shift earlier
+        let offset_hns = offset_ms as i64 * 10_000;
+        assert_eq!(offset_hns, -500_000);
+
+        let raw_pts = 10_000_000i64; // 1.000s
+        let adj_pts = (raw_pts + offset_hns).max(0);
+        assert_eq!(adj_pts, 9_500_000); // 0.950s (shifted 50ms earlier)
+
+        // Clamping check for near-zero start
+        let near_zero_pts = 200_000i64;
+        let clamped = (near_zero_pts + offset_hns).max(0);
+        assert_eq!(clamped, 0);
     }
 }

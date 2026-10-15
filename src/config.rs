@@ -114,6 +114,9 @@ pub struct Config {
     /// Whether to render mouse cursor on captured frames (defaults to false for 0% GPU overhead).
     #[serde(default)]
     pub capture_cursor: bool,
+    /// Audio synchronization offset in milliseconds (default: 0, negative values shift audio earlier).
+    #[serde(default)]
+    pub audio_sync_offset_ms: i32,
 }
 
 impl Config {
@@ -156,6 +159,7 @@ impl Default for Config {
             hotkey_record_vk: VK_F9.0 as u32,
             hotkey_screenshot_vk: VK_F1.0 as u32,
             capture_cursor: false,
+            audio_sync_offset_ms: 0,
         }
     }
 }

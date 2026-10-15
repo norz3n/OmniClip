@@ -43,6 +43,8 @@ pub enum UiAction {
     SetDisplayIndex(u32),
     /// Toggle mouse cursor capture.
     SetCaptureCursor(bool),
+    /// Adjust audio synchronization offset in milliseconds.
+    SetAudioSyncOffset(i32),
     /// Request clean application shutdown.
     QuitApplication,
 }
@@ -2009,6 +2011,24 @@ impl OmniClipApp {
                 ) {
                     self.state.write().audio_multi_track = multi;
                     let _ = self.action_tx.send(UiAction::SetAudioMultiTrack(multi));
+                }
+
+                ui.add_space(8.0);
+
+                let mut sync_offset = state.audio_sync_offset_ms as f32;
+                let sync_badge = format!("{:+0.0} ms", sync_offset);
+                if self.render_slider_row(
+                    ui,
+                    t(TextKey::AudioSyncOffset, lang),
+                    &mut sync_offset,
+                    -300.0..=300.0,
+                    Some(5.0),
+                    &sync_badge,
+                    88.0,
+                ) {
+                    let offset_int = sync_offset.round() as i32;
+                    self.state.write().audio_sync_offset_ms = offset_int;
+                    let _ = self.action_tx.send(UiAction::SetAudioSyncOffset(offset_int));
                 }
             },
         );
