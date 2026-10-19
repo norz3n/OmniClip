@@ -134,10 +134,10 @@ cargo build --release
 
 ```powershell
 # Compile the installer using the preprocessor version parameter
-iscc /DMyAppVersion=0.2.1 installer/omniclip_setup.iss
+iscc /DMyAppVersion=0.2.2 installer/omniclip_setup.iss
 
 # Generated installer:
-# dist/OmniClip_Setup_0.2.1.exe
+# dist/OmniClip_Setup_0.2.2.exe
 ```
 
 ---

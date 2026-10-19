@@ -3,7 +3,7 @@
 
 #define MyAppName "OmniClip"
 #ifndef MyAppVersion
-#define MyAppVersion "0.2.1"
+#define MyAppVersion "0.2.2"
 #endif
 #define MyAppPublisher "OmniClip Team"
 #define MyAppURL "https://github.com/norz3n/OmniClip"

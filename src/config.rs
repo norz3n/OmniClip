@@ -40,6 +40,10 @@ fn default_language() -> String {
     "auto".to_string()
 }
 
+fn default_capture_device() -> String {
+    "default".to_string()
+}
+
 #[link(name = "kernel32")]
 extern "system" {
     fn GetUserDefaultUILanguage() -> u16;
@@ -114,6 +118,9 @@ pub struct Config {
     /// Whether to render mouse cursor on captured frames (defaults to false for 0% GPU overhead).
     #[serde(default)]
     pub capture_cursor: bool,
+    /// Selected audio capture/microphone endpoint ID ("default" for system default).
+    #[serde(default = "default_capture_device")]
+    pub capture_device: String,
     /// Audio synchronization offset in milliseconds (default: 0, negative values shift audio earlier).
     #[serde(default)]
     pub audio_sync_offset_ms: i32,
@@ -159,6 +166,7 @@ impl Default for Config {
             hotkey_record_vk: VK_F9.0 as u32,
             hotkey_screenshot_vk: VK_F1.0 as u32,
             capture_cursor: false,
+            capture_device: default_capture_device(),
             audio_sync_offset_ms: 0,
         }
     }

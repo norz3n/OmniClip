@@ -27,6 +27,8 @@ pub enum UiAction {
     ToggleMic,
     /// Adjust microphone recording volume.
     SetMicVolume(f32),
+    /// Change active audio capture/microphone endpoint.
+    SetCaptureDevice(String),
     /// Change target folder for saved clips.
     SetOutputDir(PathBuf),
     /// Change filename pattern template.
@@ -1619,11 +1621,13 @@ impl OmniClipApp {
                             let is_def = state.selected_capture_device == "default" || state.selected_capture_device.is_empty();
                             if ui.selectable_label(is_def, default_mic_lbl).clicked() {
                                 self.state.write().selected_capture_device = "default".to_string();
+                                let _ = self.action_tx.send(UiAction::SetCaptureDevice("default".to_string()));
                             }
                             for (dev_id, dev_name) in &state.available_capture_devices {
                                 let is_sel = &state.selected_capture_device == dev_id;
                                 if ui.selectable_label(is_sel, dev_name).clicked() {
                                     self.state.write().selected_capture_device = dev_id.clone();
+                                    let _ = self.action_tx.send(UiAction::SetCaptureDevice(dev_id.clone()));
                                 }
                             }
                         });
@@ -1670,6 +1674,46 @@ impl OmniClipApp {
                     self.state.write().mic_volume = vol;
                     let _ = self.action_tx.send(UiAction::SetMicVolume(vol));
                 }
+
+                ui.add_space(6.0);
+
+                // Live VU volume meter and status for microphone
+                self.render_row(ui, |ui| {
+                    ui.label(RichText::new(t(TextKey::MicLevelLabel, lang)).color(M3Theme::EGUI_ON_SURFACE).size(12.5));
+                    let peak = state.mic_live_peak;
+                    let is_active = state.mic_enabled && (state.mic_status_msg == "OK" || state.mic_status_msg.is_empty());
+
+                    let bar_w = 160.0_f32;
+                    let bar_h = 6.0_f32;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, CornerRadius::same(3), Color32::from_rgb(20, 22, 28));
+
+                    if is_active && peak > 0.002 {
+                        let fill_w = (rect.width() * peak.clamp(0.0, 1.0)).max(2.0);
+                        let fill_rect = egui::Rect::from_min_size(rect.min, egui::vec2(fill_w, rect.height()));
+                        let meter_color = if peak > 0.85 {
+                            Color32::from_rgb(239, 68, 68)
+                        } else if peak > 0.65 {
+                            Color32::from_rgb(245, 158, 11)
+                        } else {
+                            M3Theme::EGUI_STATUS_GREEN
+                        };
+                        ui.painter().rect_filled(fill_rect, CornerRadius::same(3), meter_color);
+                    }
+
+                    let (status_text, status_color) = if !state.mic_enabled {
+                        (t(TextKey::MicDisabled, lang), M3Theme::EGUI_ON_SURFACE_VARIANT)
+                    } else if state.mic_status_msg == "Disconnected" {
+                        (t(TextKey::MicDisconnected, lang), Color32::from_rgb(239, 68, 68))
+                    } else if !state.mic_status_msg.is_empty() && state.mic_status_msg != "OK" {
+                        (state.mic_status_msg.as_str(), Color32::from_rgb(239, 68, 68))
+                    } else if peak > 0.002 {
+                        (t(TextKey::MicSignal, lang), M3Theme::EGUI_STATUS_GREEN)
+                    } else {
+                        (t(TextKey::MicSilent, lang), M3Theme::EGUI_ON_SURFACE_VARIANT)
+                    };
+                    ui.label(RichText::new(status_text).color(status_color).size(11.0));
+                });
 
                 ui.add_space(4.0);
 

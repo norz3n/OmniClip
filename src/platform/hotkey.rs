@@ -68,54 +68,57 @@ impl HotkeyListener {
                 thread_id_clone.store(tid, Ordering::SeqCst);
 
                 // Register global hotkey for replay buffer (Alt+F10 default)
-                let reg_replay = unsafe {
+                if let Err(e) = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_REPLAY_ID,
                         modifiers | MOD_NOREPEAT,
                         replay_vk,
                     )
-                };
-
-                if let Err(e) = reg_replay {
-                    let _ = init_tx.send(Err(anyhow!("Failed to register replay hotkey: {}", e)));
-                    return;
+                } {
+                    warn!("Replay hotkey (0x{:X}) registration failed (possibly used by GeForce Experience/ShadowPlay): {}", replay_vk, e);
                 }
 
                 // Register global hotkey for overlay toggle (Alt+Z default)
-                let _ = unsafe {
+                if let Err(e) = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_OVERLAY_ID,
                         modifiers | MOD_NOREPEAT,
                         overlay_vk,
                     )
-                };
+                } {
+                    warn!("Overlay hotkey (0x{:X}) registration failed: {}", overlay_vk, e);
+                }
 
                 // Register global hotkey for manual record toggle (Alt+F9 default)
-                let _ = unsafe {
+                if let Err(e) = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_RECORD_ID,
                         modifiers | MOD_NOREPEAT,
                         record_vk,
                     )
-                };
+                } {
+                    warn!("Record hotkey (0x{:X}) registration failed: {}", record_vk, e);
+                }
 
                 // Register global hotkey for screenshot capture (Alt+F1 default)
-                let _ = unsafe {
+                if let Err(e) = unsafe {
                     RegisterHotKey(
                         HWND(std::ptr::null_mut()),
                         OMNICLIP_HOTKEY_SCREENSHOT_ID,
                         modifiers | MOD_NOREPEAT,
                         screenshot_vk,
                     )
-                };
+                } {
+                    warn!("Screenshot hotkey (0x{:X}) registration failed: {}", screenshot_vk, e);
+                }
 
                 let _ = init_tx.send(Ok(()));
                 info!(
-                    "Registered global hotkeys: Replay (0x{:X}), Overlay (0x{:X}), Record (0x{:X}), Screenshot (0x{:X})",
-                    OMNICLIP_HOTKEY_REPLAY_ID, OMNICLIP_HOTKEY_OVERLAY_ID, OMNICLIP_HOTKEY_RECORD_ID, OMNICLIP_HOTKEY_SCREENSHOT_ID
+                    "Hotkey registration complete: Replay (0x{:X}), Overlay (0x{:X}), Record (0x{:X}), Screenshot (0x{:X})",
+                    replay_vk, overlay_vk, record_vk, screenshot_vk
                 );
 
                 let mut msg = MSG::default();

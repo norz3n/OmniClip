@@ -149,6 +149,10 @@ pub struct UiState {
     pub mic_ptt_key: String,
     /// Microphone noise gate threshold in decibels (-60 dB to 0 dB).
     pub mic_noise_gate_db: f32,
+    /// Live microphone volume peak (0.0 to 1.0) for the UI VU meter.
+    pub mic_live_peak: f32,
+    /// Live microphone status message (e.g. "OK", "Disconnected", "Access Denied").
+    pub mic_status_msg: String,
 
     /// Master game/desktop audio loopback enabled.
     pub game_audio_enabled: bool,
@@ -271,6 +275,8 @@ impl UiState {
             mic_mode_ptt: false,
             mic_ptt_key: "V".to_string(),
             mic_noise_gate_db: -45.0,
+            mic_live_peak: 0.0,
+            mic_status_msg: "OK".to_string(),
             game_audio_enabled: true,
             game_audio_volume: 1.0,
             audio_bitrate_kbps: 192,

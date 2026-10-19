@@ -102,12 +102,179 @@ fn resample_linear(
     output
 }
 
+/// Supported hardware audio sample formats for low-latency decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioSampleFormat {
+    Float32,
+    Int16,
+    Int24Packed,
+    Int32Pcm,
+}
+
+#[repr(C)]
+struct WaveFormatExtensible {
+    _format: windows::Win32::Media::Audio::WAVEFORMATEX,
+    _samples: u16, // wValidBitsPerSample
+    _channel_mask: u32,
+    sub_format: windows::core::GUID,
+}
+
+fn detect_sample_format(ptr: *const windows::Win32::Media::Audio::WAVEFORMATEX) -> AudioSampleFormat {
+    unsafe {
+        let fmt = &*ptr;
+        if fmt.wFormatTag == 3 {
+            return AudioSampleFormat::Float32;
+        }
+        if fmt.wFormatTag == 1 {
+            return match fmt.wBitsPerSample {
+                16 => AudioSampleFormat::Int16,
+                24 => AudioSampleFormat::Int24Packed,
+                32 => AudioSampleFormat::Int32Pcm,
+                _ => AudioSampleFormat::Int16,
+            };
+        }
+        if fmt.wFormatTag == 0xFFFE {
+            let ext = &*(ptr as *const WaveFormatExtensible);
+            if ext.sub_format.data1 == 3 {
+                return AudioSampleFormat::Float32;
+            }
+            return match fmt.wBitsPerSample {
+                16 => AudioSampleFormat::Int16,
+                24 => AudioSampleFormat::Int24Packed,
+                32 => AudioSampleFormat::Int32Pcm,
+                _ => AudioSampleFormat::Int16,
+            };
+        }
+        AudioSampleFormat::Int16
+    }
+}
+
+fn decode_raw_audio_samples(
+    ptr: *const u8,
+    frames: usize,
+    channels: usize,
+    format: AudioSampleFormat,
+) -> Vec<f32> {
+    let total_samples = frames * channels;
+    let mut out = Vec::with_capacity(total_samples);
+
+    match format {
+        AudioSampleFormat::Float32 => {
+            let slice = unsafe { std::slice::from_raw_parts(ptr as *const f32, total_samples) };
+            out.extend_from_slice(slice);
+        }
+        AudioSampleFormat::Int16 => {
+            let slice = unsafe { std::slice::from_raw_parts(ptr as *const i16, total_samples) };
+            for &s in slice {
+                out.push(s as f32 / 32768.0);
+            }
+        }
+        AudioSampleFormat::Int24Packed => {
+            let byte_slice = unsafe { std::slice::from_raw_parts(ptr, total_samples * 3) };
+            for chunk in byte_slice.chunks_exact(3) {
+                let b0 = chunk[0] as u32;
+                let b1 = (chunk[1] as u32) << 8;
+                let b2 = (chunk[2] as i8 as i32 as u32) << 16;
+                let val = (b0 | b1 | b2) as i32;
+                out.push(val as f32 / 8388608.0);
+            }
+        }
+        AudioSampleFormat::Int32Pcm => {
+            let slice = unsafe { std::slice::from_raw_parts(ptr as *const i32, total_samples) };
+            for &s in slice {
+                out.push(s as f32 / 2147483648.0);
+            }
+        }
+    }
+    out
+}
+
+/// Helper function to initialize a microphone capture client endpoint.
+fn init_mic_endpoint(
+    enumerator: &windows::Win32::Media::Audio::IMMDeviceEnumerator,
+    capture_device_id: Option<&str>,
+) -> Result<(IAudioClient, IAudioCaptureClient, AudioSampleFormat, u32, u32)> {
+    let mic_device = unsafe {
+        if let Some(dev_id) = capture_device_id {
+            if !dev_id.is_empty() && dev_id != "default" {
+                let wide: Vec<u16> = dev_id.encode_utf16().chain(std::iter::once(0)).collect();
+                enumerator
+                    .GetDevice(windows::core::PCWSTR(wide.as_ptr()))
+                    .or_else(|_| enumerator.GetDefaultAudioEndpoint(eCapture, eConsole))
+            } else {
+                enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
+            }
+        } else {
+            enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
+        }
+        .map_err(|e| anyhow!("No microphone endpoint found: {}", e))?
+    };
+
+    let mic_client: IAudioClient = unsafe {
+        mic_device
+            .Activate(CLSCTX_ALL, None)
+            .map_err(|e| anyhow!("Failed to activate microphone client: {}", e))?
+    };
+
+    let mic_format_ptr = unsafe {
+        mic_client
+            .GetMixFormat()
+            .map_err(|e| anyhow!("Failed to get microphone mix format: {}", e))?
+    };
+
+    let mic_fmt = unsafe { *mic_format_ptr };
+    let m_channels = mic_fmt.nChannels as u32;
+    let m_rate = mic_fmt.nSamplesPerSec;
+    let m_bits = mic_fmt.wBitsPerSample;
+    let sample_format = detect_sample_format(mic_format_ptr);
+
+    let m_init = unsafe {
+        mic_client.Initialize(
+            AUDCLNT_SHAREMODE_SHARED,
+            0, // Shared capture mode (not loopback)
+            HNS_PER_SECOND,
+            0,
+            mic_format_ptr,
+            None,
+        )
+    };
+
+    unsafe {
+        CoTaskMemFree(Some(mic_format_ptr as *const _));
+    }
+
+    m_init.map_err(|e| anyhow!("Failed to initialize microphone client: {}", e))?;
+
+    let mic_capture: IAudioCaptureClient = unsafe {
+        mic_client
+            .GetService()
+            .map_err(|e| anyhow!("Failed to get microphone capture client: {}", e))?
+    };
+
+    unsafe {
+        mic_client
+            .Start()
+            .map_err(|e| anyhow!("Failed to start microphone client: {}", e))?;
+    }
+
+    info!(
+        "Initialized Microphone capture: {} Hz, {} channels, {} bit, format: {:?}",
+        m_rate, m_channels, m_bits, sample_format
+    );
+
+    Ok((mic_client, mic_capture, sample_format, m_rate, m_channels))
+}
+
 /// WASAPI Loopback system audio and microphone capture engine running on a dedicated thread.
 pub struct WasapiLoopbackCapture {
     running: Arc<AtomicBool>,
     mic_enabled: Arc<AtomicBool>,
     mic_volume: Arc<parking_lot::Mutex<f32>>,
     sync_offset_hns: Arc<AtomicI64>,
+    mic_peak: Arc<std::sync::atomic::AtomicU32>,
+    mic_status: Arc<parking_lot::Mutex<String>>,
+    requested_capture_device: Arc<parking_lot::Mutex<Option<String>>>,
+    device_changed: Arc<AtomicBool>,
     thread_handle: Option<JoinHandle<()>>,
 }
 
@@ -145,6 +312,18 @@ impl WasapiLoopbackCapture {
         let sync_offset_hns = Arc::new(AtomicI64::new(sync_offset_ms as i64 * 10_000));
         let sync_offset_hns_thread = sync_offset_hns.clone();
 
+        let mic_peak = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let mic_peak_thread = mic_peak.clone();
+
+        let mic_status = Arc::new(parking_lot::Mutex::new("OK".to_string()));
+        let mic_status_thread = mic_status.clone();
+
+        let requested_capture_device = Arc::new(parking_lot::Mutex::new(capture_device_id.clone()));
+        let requested_capture_device_thread = requested_capture_device.clone();
+
+        let device_changed = Arc::new(AtomicBool::new(false));
+        let device_changed_thread = device_changed.clone();
+
         let (init_tx, init_rx) = crossbeam_channel::bounded::<Result<()>>(1);
 
         let handle = thread::Builder::new()
@@ -155,13 +334,20 @@ impl WasapiLoopbackCapture {
                 }
 
                 type LoopbackInit = (IAudioClient, IAudioCaptureClient, AacEncoder, bool, u32, u32);
-                type MicInit = Option<(IAudioClient, IAudioCaptureClient, bool, u32, u32)>;
+                type MicInit = Option<(IAudioClient, IAudioCaptureClient, AudioSampleFormat, u32, u32)>;
+
+                let enumerator: IMMDeviceEnumerator = match unsafe {
+                    CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
+                } {
+                    Ok(e) => e,
+                    Err(e) => {
+                        let _ = init_tx.send(Err(anyhow!("Failed to create MMDeviceEnumerator: {}", e)));
+                        unsafe { CoUninitialize(); }
+                        return;
+                    }
+                };
 
                 let init_res = (|| -> Result<(LoopbackInit, MicInit)> {
-                    let enumerator: IMMDeviceEnumerator = unsafe {
-                        CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)
-                            .map_err(|e| anyhow!("Failed to create MMDeviceEnumerator: {}", e))?
-                    };
 
                     // 1. Initialize Loopback System Audio Endpoint
                     let device = unsafe {
@@ -244,85 +430,15 @@ impl WasapiLoopbackCapture {
                     );
 
                     // 2. Optional Microphone Capture Endpoint
-                    let mic_opt: MicInit = {
-                        let mic_init_result = (|| -> Result<(IAudioClient, IAudioCaptureClient, bool, u32, u32)> {
-                            let mic_device = unsafe {
-                                if let Some(ref dev_id) = capture_device_id {
-                                    if !dev_id.is_empty() && dev_id != "default" {
-                                        let wide: Vec<u16> = dev_id.encode_utf16().chain(std::iter::once(0)).collect();
-                                        enumerator
-                                            .GetDevice(windows::core::PCWSTR(wide.as_ptr()))
-                                            .or_else(|_| enumerator.GetDefaultAudioEndpoint(eCapture, eConsole))
-                                    } else {
-                                        enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
-                                    }
-                                } else {
-                                    enumerator.GetDefaultAudioEndpoint(eCapture, eConsole)
-                                }
-                                .map_err(|e| anyhow!("No microphone endpoint: {}", e))?
-                            };
-
-                            let mic_client: IAudioClient = unsafe {
-                                mic_device
-                                    .Activate(CLSCTX_ALL, None)
-                                    .map_err(|e| anyhow!("Failed to activate microphone client: {}", e))?
-                            };
-
-                            let mic_format_ptr = unsafe {
-                                mic_client
-                                    .GetMixFormat()
-                                    .map_err(|e| anyhow!("Failed to get microphone mix format: {}", e))?
-                            };
-
-                            let mic_fmt = unsafe { *mic_format_ptr };
-                            let m_channels = mic_fmt.nChannels as u32;
-                            let m_rate = mic_fmt.nSamplesPerSec;
-                            let m_bits = mic_fmt.wBitsPerSample;
-                            let m_float = mic_fmt.wFormatTag == 3 || (mic_fmt.wFormatTag == 0xFFFE && m_bits == 32);
-
-                            let m_init = unsafe {
-                                mic_client.Initialize(
-                                    AUDCLNT_SHAREMODE_SHARED,
-                                    0, // Shared capture mode (not loopback)
-                                    HNS_PER_SECOND,
-                                    0,
-                                    mic_format_ptr,
-                                    None,
-                                )
-                            };
-
-                            unsafe {
-                                CoTaskMemFree(Some(mic_format_ptr as *const _));
-                            }
-
-                            m_init.map_err(|e| anyhow!("Failed to initialize microphone client: {}", e))?;
-
-                            let mic_capture: IAudioCaptureClient = unsafe {
-                                mic_client
-                                    .GetService()
-                                    .map_err(|e| anyhow!("Failed to get microphone capture client: {}", e))?
-                            };
-
-                            unsafe {
-                                mic_client
-                                    .Start()
-                                    .map_err(|e| anyhow!("Failed to start microphone client: {}", e))?;
-                            }
-
-                            info!(
-                                "Initialized Microphone capture: {} Hz, {} channels, {} bit (Float: {})",
-                                m_rate, m_channels, m_bits, m_float
-                            );
-
-                            Ok((mic_client, mic_capture, m_float, m_rate, m_channels))
-                        })();
-
-                        match mic_init_result {
-                            Ok(res) => Some(res),
-                            Err(e) => {
-                                info!("Microphone capture unavailable, running loopback only: {}", e);
-                                None
-                            }
+                    let mic_opt: MicInit = match init_mic_endpoint(&enumerator, capture_device_id.as_deref()) {
+                        Ok(m) => {
+                            *mic_status_thread.lock() = "OK".to_string();
+                            Some(m)
+                        }
+                        Err(e) => {
+                            warn!("Initial microphone capture setup: {}", e);
+                            *mic_status_thread.lock() = format!("{}", e);
+                            None
                         }
                     };
 
@@ -331,7 +447,7 @@ impl WasapiLoopbackCapture {
 
                 let (
                     (audio_client, capture_client, mut encoder, is_float, sample_rate, channels),
-                    mic_client_opt,
+                    mut mic_client_opt,
                 ) = match init_res {
                     Ok(res) => {
                         let _ = init_tx.send(Ok(()));
@@ -358,13 +474,57 @@ impl WasapiLoopbackCapture {
 
                 let mut mic_fifo = std::collections::VecDeque::<(f32, f32)>::with_capacity(4800);
                 let mut mic_resample_phase = 0.0f64;
+                let mut last_mic_retry = std::time::Instant::now();
 
                 while running_clone.load(Ordering::SeqCst) {
+                    // 1. Dynamic device switch request from UI
+                    if device_changed_thread.swap(false, Ordering::SeqCst) {
+                        if let Some((old_client, ..)) = mic_client_opt.take() {
+                            unsafe { let _ = old_client.Stop(); }
+                        }
+                        let dev = requested_capture_device_thread.lock().clone();
+                        match init_mic_endpoint(&enumerator, dev.as_deref()) {
+                            Ok(m) => {
+                                info!("Microphone switched successfully to device: {:?}", dev);
+                                *mic_status_thread.lock() = "OK".to_string();
+                                if multi_track && mic_encoder_opt.is_none() {
+                                    mic_encoder_opt = AacEncoder::new(TARGET_SAMPLE_RATE, TARGET_CHANNELS, target_bitrate).ok();
+                                }
+                                mic_client_opt = Some(m);
+                            }
+                            Err(e) => {
+                                warn!("Failed to switch microphone to {:?}: {}", dev, e);
+                                *mic_status_thread.lock() = format!("{}", e);
+                            }
+                        }
+                    }
+
+                    // 2. Periodic reconnect watchdog if microphone client is not active
+                    let now_instant = std::time::Instant::now();
+                    if mic_client_opt.is_none() && now_instant.duration_since(last_mic_retry) >= std::time::Duration::from_secs(2) {
+                        last_mic_retry = now_instant;
+                        let dev = requested_capture_device_thread.lock().clone();
+                        match init_mic_endpoint(&enumerator, dev.as_deref()) {
+                            Ok(m) => {
+                                info!("Microphone successfully (re)connected!");
+                                *mic_status_thread.lock() = "OK".to_string();
+                                if multi_track && mic_encoder_opt.is_none() {
+                                    mic_encoder_opt = AacEncoder::new(TARGET_SAMPLE_RATE, TARGET_CHANNELS, target_bitrate).ok();
+                                }
+                                mic_client_opt = Some(m);
+                            }
+                            Err(e) => {
+                                debug!("Microphone reconnection attempt: {}", e);
+                                *mic_status_thread.lock() = format!("{}", e);
+                            }
+                        }
+                    }
+
                     let is_mic_active = mic_enabled_thread.load(Ordering::Relaxed);
                     let cur_mic_volume = if is_mic_active { *mic_volume_thread.lock() } else { 0.0 };
 
                     // Poll and buffer incoming microphone packets
-                    if let Some((_, ref mic_capture, m_float, m_rate, m_ch)) = mic_client_opt {
+                    if let Some((_, ref mic_capture, sample_format, m_rate, m_ch)) = mic_client_opt {
                         let mut m_packet = unsafe { mic_capture.GetNextPacketSize().unwrap_or(0) };
                         while m_packet > 0 {
                             let mut m_ptr: *mut u8 = std::ptr::null_mut();
@@ -383,53 +543,81 @@ impl WasapiLoopbackCapture {
                                 )
                             };
 
-                            if let Ok(()) = get_res {
-                                if m_frames > 0 {
-                                    let is_silent = (m_flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
-                                    if !is_silent && !m_ptr.is_null() {
-                                        let stereo = if m_float {
-                                            let count = m_frames as usize * m_ch as usize;
-                                            let slice = unsafe { std::slice::from_raw_parts(m_ptr as *const f32, count) };
-                                            downmix_to_stereo(slice, m_ch as usize)
-                                        } else {
-                                            let count = m_frames as usize * m_ch as usize;
-                                            let slice = unsafe { std::slice::from_raw_parts(m_ptr as *const i16, count) };
-                                            let floats: Vec<f32> = slice.iter().map(|&s| s as f32 / 32768.0).collect();
-                                            downmix_to_stereo(&floats, m_ch as usize)
-                                        };
+                            match get_res {
+                                Ok(()) => {
+                                    if m_frames > 0 {
+                                        let is_silent = (m_flags & AUDCLNT_BUFFERFLAGS_SILENT.0 as u32) != 0;
+                                        if !is_silent && !m_ptr.is_null() {
+                                            let floats = decode_raw_audio_samples(
+                                                m_ptr,
+                                                m_frames as usize,
+                                                m_ch as usize,
+                                                sample_format,
+                                            );
 
-                                        let resampled = resample_linear(
-                                            &stereo,
-                                            m_rate,
-                                            TARGET_SAMPLE_RATE,
-                                            &mut mic_resample_phase,
-                                        );
-                                        for s in resampled {
-                                            mic_fifo.push_back(s);
-                                        }
-                                    } else {
-                                        let out_frames = if m_rate == TARGET_SAMPLE_RATE {
-                                            m_frames as usize
+                                            // Calculate live peak for VU meter
+                                            let mut frame_peak = 0.0f32;
+                                            for &f in &floats {
+                                                let abs = f.abs();
+                                                if abs > frame_peak {
+                                                    frame_peak = abs;
+                                                }
+                                            }
+                                            let cur_peak = (mic_peak_thread.load(Ordering::Relaxed) as f32) / 1000.0;
+                                            let new_peak = if frame_peak > cur_peak {
+                                                frame_peak
+                                            } else {
+                                                (cur_peak * 0.92).max(0.0)
+                                            };
+                                            mic_peak_thread.store((new_peak * 1000.0) as u32, Ordering::Relaxed);
+
+                                            let stereo = downmix_to_stereo(&floats, m_ch as usize);
+                                            let resampled = resample_linear(
+                                                &stereo,
+                                                m_rate,
+                                                TARGET_SAMPLE_RATE,
+                                                &mut mic_resample_phase,
+                                            );
+                                            for s in resampled {
+                                                mic_fifo.push_back(s);
+                                            }
                                         } else {
-                                            ((m_frames as u64 * TARGET_SAMPLE_RATE as u64) / m_rate as u64) as usize
-                                        };
-                                        for _ in 0..out_frames {
-                                            mic_fifo.push_back((0.0, 0.0));
+                                            // Falloff VU peak on silent buffer
+                                            let cur_peak = (mic_peak_thread.load(Ordering::Relaxed) as f32) / 1000.0;
+                                            mic_peak_thread.store(((cur_peak * 0.85) * 1000.0) as u32, Ordering::Relaxed);
+
+                                            let out_frames = if m_rate == TARGET_SAMPLE_RATE {
+                                                m_frames as usize
+                                            } else {
+                                                ((m_frames as u64 * TARGET_SAMPLE_RATE as u64) / m_rate as u64) as usize
+                                            };
+                                            for _ in 0..out_frames {
+                                                mic_fifo.push_back((0.0, 0.0));
+                                            }
                                         }
+                                        let _ = unsafe { mic_capture.ReleaseBuffer(m_frames) };
                                     }
-                                    let _ = unsafe { mic_capture.ReleaseBuffer(m_frames) };
                                 }
-                            } else {
-                                break;
+                                Err(e) => {
+                                    warn!("Microphone capture GetBuffer error: {}. Disconnecting to allow reconnection...", e);
+                                    *mic_status_thread.lock() = "Disconnected".to_string();
+                                    if let Some((client, ..)) = mic_client_opt.take() {
+                                        unsafe { let _ = client.Stop(); }
+                                    }
+                                    break;
+                                }
                             }
                             m_packet = unsafe { mic_capture.GetNextPacketSize().unwrap_or(0) };
                         }
 
-                        // PONYTAIL: FIFO sample-slip mixer instead of phase-locked PLL resampler. Ceiling: occasional dropped/duplicated sample between unsynced DAC/ADC clocks. Upgrade path: Dynamic drift tracking PLL mixer or separate audio track.
+                        // FIFO sample-slip mixer bounds
                         const MAX_MIC_LATENCY_SAMPLES: usize = 2400; // ~50 ms
                         while mic_fifo.len() > MAX_MIC_LATENCY_SAMPLES {
                             mic_fifo.pop_front();
                         }
+                    } else {
+                        // Peak is 0 when no mic client is available
+                        mic_peak_thread.store(0, Ordering::Relaxed);
                     }
 
                     let mut packet_size = match unsafe { capture_client.GetNextPacketSize() } {
@@ -603,13 +791,13 @@ impl WasapiLoopbackCapture {
                                     if mic_encoder_opt.is_some() {
                                         pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
                                         pcm_buffer.extend_from_slice(&0i16.to_le_bytes());
-                                        let m_l = ((mic_l * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
-                                        let m_r = ((mic_r * mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        let m_l = ((mic_l * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
+                                        let m_r = ((mic_r * cur_mic_volume).clamp(-1.0, 1.0) * 32767.0) as i16;
                                         mic_pcm_buffer.extend_from_slice(&m_l.to_le_bytes());
                                         mic_pcm_buffer.extend_from_slice(&m_r.to_le_bytes());
                                     } else {
-                                        let mix_l = (mic_l * mic_volume).clamp(-1.0, 1.0);
-                                        let mix_r = (mic_r * mic_volume).clamp(-1.0, 1.0);
+                                        let mix_l = (mic_l * cur_mic_volume).clamp(-1.0, 1.0);
+                                        let mix_r = (mic_r * cur_mic_volume).clamp(-1.0, 1.0);
                                         let s_l = (mix_l * 32767.0) as i16;
                                         let s_r = (mix_r * 32767.0) as i16;
                                         pcm_buffer.extend_from_slice(&s_l.to_le_bytes());
@@ -724,8 +912,28 @@ impl WasapiLoopbackCapture {
             mic_enabled: mic_enabled_arc,
             mic_volume: mic_volume_arc,
             sync_offset_hns,
+            mic_peak,
+            mic_status,
+            requested_capture_device,
+            device_changed,
             thread_handle: Some(handle),
         })
+    }
+
+    /// Dynamically sets the active microphone capture device.
+    pub fn set_capture_device(&self, device_id: Option<String>) {
+        *self.requested_capture_device.lock() = device_id;
+        self.device_changed.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns the current microphone peak volume (0.0 to 1.0) for live VU meters.
+    pub fn mic_peak(&self) -> f32 {
+        (self.mic_peak.load(Ordering::Relaxed) as f32) / 1000.0
+    }
+
+    /// Returns the current microphone status message (e.g. "OK" or error description).
+    pub fn mic_status(&self) -> String {
+        self.mic_status.lock().clone()
     }
 
     /// Dynamically sets the audio synchronization offset in milliseconds.
@@ -1097,5 +1305,40 @@ mod tests {
         let near_zero_pts = 200_000i64;
         let clamped = (near_zero_pts + offset_hns).max(0);
         assert_eq!(clamped, 0);
+    }
+
+    #[test]
+    fn test_decode_raw_audio_samples_formats() {
+        use super::{decode_raw_audio_samples, AudioSampleFormat};
+
+        // 1. Float32
+        let floats = vec![0.5f32, -0.5f32];
+        let decoded_f32 = decode_raw_audio_samples(floats.as_ptr() as *const u8, 1, 2, AudioSampleFormat::Float32);
+        assert_eq!(decoded_f32.len(), 2);
+        assert!((decoded_f32[0] - 0.5).abs() < 1e-6);
+        assert!((decoded_f32[1] - (-0.5)).abs() < 1e-6);
+
+        // 2. Int16 (32768 full scale)
+        let int16s = vec![16384i16, -16384i16];
+        let decoded_i16 = decode_raw_audio_samples(int16s.as_ptr() as *const u8, 1, 2, AudioSampleFormat::Int16);
+        assert_eq!(decoded_i16.len(), 2);
+        assert!((decoded_i16[0] - 0.5).abs() < 1e-4);
+        assert!((decoded_i16[1] - (-0.5)).abs() < 1e-4);
+
+        // 3. Int24Packed (8388608 full scale, 3 bytes per sample)
+        // 4194304 in 24-bit LE: 0x00, 0x00, 0x40
+        // -4194304 in 24-bit LE: 0x00, 0x00, 0xC0
+        let int24_bytes = vec![0x00u8, 0x00, 0x40, 0x00, 0x00, 0xC0];
+        let decoded_i24 = decode_raw_audio_samples(int24_bytes.as_ptr(), 1, 2, AudioSampleFormat::Int24Packed);
+        assert_eq!(decoded_i24.len(), 2);
+        assert!((decoded_i24[0] - 0.5).abs() < 1e-4);
+        assert!((decoded_i24[1] - (-0.5)).abs() < 1e-4);
+
+        // 4. Int32Pcm (2147483648 full scale)
+        let int32s = vec![1073741824i32, -1073741824i32];
+        let decoded_i32 = decode_raw_audio_samples(int32s.as_ptr() as *const u8, 1, 2, AudioSampleFormat::Int32Pcm);
+        assert_eq!(decoded_i32.len(), 2);
+        assert!((decoded_i32[0] - 0.5).abs() < 1e-6);
+        assert!((decoded_i32[1] - (-0.5)).abs() < 1e-6);
     }
 }

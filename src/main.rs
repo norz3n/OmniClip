@@ -145,6 +145,7 @@ fn main() -> Result<()> {
         st.audio_multi_track = config.audio_multi_track;
         st.video_codec = config.video_codec;
         st.selected_display_index = config.display_index;
+        st.selected_capture_device = config.capture_device.clone();
         st.hotkey_replay_vk = config.hotkey_vk;
         st.hotkey_overlay_vk = config.hotkey_overlay_vk;
         st.hotkey_record_vk = config.hotkey_record_vk;
@@ -166,13 +167,18 @@ fn main() -> Result<()> {
     // Audio capture channel
     let timer = QpcTimer::new()?;
     let (audio_tx, audio_rx) = crossbeam_channel::unbounded();
+    let initial_capture_device = if config.capture_device.is_empty() || config.capture_device == "default" {
+        None
+    } else {
+        Some(config.capture_device.clone())
+    };
     let audio_capture = Arc::new(parking_lot::Mutex::new(WasapiLoopbackCapture::spawn(
         timer.clone(),
         config.audio_bitrate,
         config.mic_enabled,
         config.mic_volume,
         None,
-        None,
+        initial_capture_device,
         config.audio_multi_track,
         config.audio_sync_offset_ms,
         audio_tx,
@@ -206,6 +212,7 @@ fn main() -> Result<()> {
                 match Mp4Muxer::write_replay(&snapshot, &target_file) {
                     Ok(path) => {
                         info!(">>> REPLAY SAVED SUCCESSFULLY: {} <<<", path.display());
+                        ui_state_writer.write().is_saving_disk = false;
                         let duration_secs = (snapshot.duration_hns() / 10_000_000) as u32;
                         let size_mb = std::fs::metadata(&path)
                             .map(|m| m.len() as f64 / (1024.0 * 1024.0))
@@ -219,6 +226,10 @@ fn main() -> Result<()> {
                     }
                     Err(e) => {
                         log::error!("Failed to save replay: {}", e);
+                        ui_state_writer.write().is_saving_disk = false;
+                        if let Some(ctx) = egui_ctx_writer.lock().as_ref() {
+                            ctx.request_repaint();
+                        }
                     }
                 }
             }
@@ -356,6 +367,7 @@ fn main() -> Result<()> {
                     config_clone.gop_size,
                     active_codec,
                 )?;
+                encoder.request_keyframe();
 
                 let mut frame_duration_hns = config_clone.frame_duration_hns();
                 let mut min_frame_interval_hns = (frame_duration_hns - 20_000).max(0);
@@ -364,8 +376,20 @@ fn main() -> Result<()> {
                 let mut last_keyframe_hns = 0i64;
                 let mut captured_frames = 0u64;
                 let mut encoded_chunks = 0u64;
+                let mut loop_tick = 0u64;
                 let mut manual_session: Option<ManualRecordSession> = None;
                 let mut last_frame: Option<omni_clip::capture::CapturedFrame> = None;
+
+                // Pre-acquire the initial desktop frame so the encoder can immediately produce a valid keyframe
+                for _ in 0..10 {
+                    if let Ok(CaptureStatus::Frame(frame)) = duplicator.acquire_frame(100) {
+                        last_frame = Some(frame.clone());
+                        if encoder.feed_frame(&frame, frame_duration_hns).is_ok() {
+                            last_encoded_hns = frame.hns_timestamp;
+                        }
+                        break;
+                    }
+                }
 
                 while running_capture.load(Ordering::Relaxed) {
                     // Drain incoming audio packets into ring buffer and manual recording session
@@ -381,6 +405,21 @@ fn main() -> Result<()> {
                         match action {
                             UiAction::SaveReplay => {
                                 info!("UI requested replay dump!");
+                                // Drain any pending encoded video frames from hardware encoder first
+                                if let Ok(chunks) = encoder.poll_output() {
+                                    let mut rb = ring_buffer_capture.lock();
+                                    for chunk in chunks {
+                                        if chunk.is_keyframe {
+                                            last_keyframe_hns = chunk.pts_hns;
+                                        }
+                                        encoded_chunks += 1;
+                                        if let Some(ref mut session) = manual_session {
+                                            session.push_video(chunk.clone());
+                                        }
+                                        rb.push_video(chunk);
+                                    }
+                                }
+
                                 let mut rb = ring_buffer_capture.lock();
                                 if let Some(snapshot) = rb.take_snapshot() {
                                     ui_state_clone.write().set_current_ram_bytes(0);
@@ -397,9 +436,23 @@ fn main() -> Result<()> {
                                     );
                                     let _ = dump_tx_capture.send((snapshot, target_file));
                                     encoder.request_keyframe();
+                                    last_keyframe_hns = 0;
+                                    if let Some(ref frame) = last_frame {
+                                        let now_hns = timer.elapsed_hns();
+                                        let mut f = frame.clone();
+                                        f.hns_timestamp = now_hns;
+                                        if encoder.can_feed() {
+                                            if encoder.feed_frame(&f, frame_duration_hns).is_ok() {
+                                                last_encoded_hns = now_hns;
+                                            }
+                                        }
+                                    }
                                 } else {
                                     log::warn!("Ring buffer not ready yet (waiting for keyframe)");
                                     ui_state_clone.write().is_saving_disk = false;
+                                    if let Some(ctx) = egui_ctx_capture.lock().as_ref() {
+                                        ctx.request_repaint();
+                                    }
                                 }
                             }
                             UiAction::ToggleManualRecord => {
@@ -496,6 +549,18 @@ fn main() -> Result<()> {
                                 config_capture.lock().mic_volume = vol;
                                 let _ = config_capture.lock().save();
                                 info!("Microphone dynamic volume set to: {:.2}", vol);
+                            }
+                            UiAction::SetCaptureDevice(dev_id) => {
+                                let dev_opt = if dev_id.is_empty() || dev_id == "default" {
+                                    None
+                                } else {
+                                    Some(dev_id.clone())
+                                };
+                                audio_capture_worker.lock().set_capture_device(dev_opt);
+                                config_capture.lock().capture_device = dev_id.clone();
+                                let _ = config_capture.lock().save();
+                                ui_state_clone.write().selected_capture_device = dev_id.clone();
+                                info!("Capture thread: Active microphone device switched to '{}'", dev_id);
                             }
                             UiAction::SetOutputDir(dir) => {
                                 config_capture.lock().output_dir = dir;
@@ -640,10 +705,18 @@ fn main() -> Result<()> {
                         }
                     }
 
-                    // Update UI RAM usage every ~60 frames
-                    if captured_frames % 60 == 0 {
-                        let ram = ring_buffer_capture.lock().total_bytes();
-                        ui_state_clone.write().set_current_ram_bytes(ram);
+                    // Update UI telemetry (RAM usage and mic VU meter / status)
+                    loop_tick += 1;
+                    if loop_tick % 3 == 0 {
+                        let peak = audio_capture_worker.lock().mic_peak();
+                        let status = audio_capture_worker.lock().mic_status();
+                        let mut st = ui_state_clone.write();
+                        st.mic_live_peak = peak;
+                        st.mic_status_msg = status;
+                        if loop_tick % 60 == 0 {
+                            let ram = ring_buffer_capture.lock().total_bytes();
+                            st.set_current_ram_bytes(ram);
+                        }
                     }
 
                     // Capture desktop frame
@@ -681,6 +754,20 @@ fn main() -> Result<()> {
                             }
                         }
                         CaptureStatus::Timeout => {
+                            let now_hns = timer.elapsed_hns();
+                            if let Some(ref mut frame) = last_frame {
+                                if last_keyframe_hns == 0 || (now_hns - last_encoded_hns >= frame_duration_hns) {
+                                    frame.hns_timestamp = now_hns;
+                                    if last_keyframe_hns == 0 {
+                                        encoder.request_keyframe();
+                                    }
+                                    if encoder.can_feed() {
+                                        if encoder.feed_frame(frame, frame_duration_hns).is_ok() {
+                                            last_encoded_hns = now_hns;
+                                        }
+                                    }
+                                }
+                            }
                             if let Ok(chunks) = encoder.poll_output() {
                                 let mut rb = ring_buffer_capture.lock();
                                 for chunk in chunks {
